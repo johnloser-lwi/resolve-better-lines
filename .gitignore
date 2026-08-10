@@ -1,0 +1,31 @@
+# Build output. The bundle, the CMake cache and the generated VS project all
+# live here, so this one line covers everything the build produces.
+build/
+out/
+
+# The offline harness writes its contact sheets next to the binaries, but keep
+# these out regardless of where they are run from.
+*.png
+
+# Visual Studio / MSBuild
+.vs/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.aps
+
+# CMake
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Logs. The probe log lives in %LOCALAPPDATA%\BetterLine and never lands here,
+# but build transcripts sometimes do.
+*.log
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
