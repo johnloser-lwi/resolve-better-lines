@@ -3,9 +3,11 @@
 build/
 out/
 
-# The offline harness writes its contact sheets next to the binaries, but keep
-# these out regardless of where they are run from.
-*.png
+# Contact sheets rendered into the repo root by running linetest from here.
+# Deliberately root-only rather than *.png: ignoring PNGs everywhere would
+# silently swallow a documentation image someone later adds under docs/, and
+# a file that refuses to be committed without saying so is a bad trap to leave.
+/*.png
 
 # Visual Studio / MSBuild
 .vs/
