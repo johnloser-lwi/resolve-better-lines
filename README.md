@@ -540,7 +540,19 @@ arc flags — a relative command that lands plausibly is not something visual in
 
 ### Global transform
 
-`Position`, `Rotation`, `Scale` and `Anchor` move every stroke together. Editing points one
+`Position`, `Rotation`, `Scale` and `Anchor` move every stroke together. **Link Scale** (on by
+default) keeps X and Y together so one edit scales proportionally.
+
+The link needs one piece of bookkeeping: `changedParam` names the *parameter* that changed but
+never which *component* of it, so with a single Double2D there is no other way to know whether
+X or Y was just dragged — and mirroring the wrong one would undo the edit as fast as it was
+made. The last scale is therefore cached and compared, seeded from the actual value rather than
+the default so that reopening a project with a non-uniform scale does not look like an edit and
+flatten it. Turning the link on snaps Y to X immediately, because a toggle claiming the axes
+are linked while they hold different values is simply wrong. The mirrored write follows the
+same keyframe rule as everything else: on an animated parameter a plain `setValue` edits the
+static value underneath the curve, so the mirrored axis would silently refuse to follow on
+exactly the shapes someone bothered to animate. Editing points one
 at a time is fine for *drawing* a shape and useless for *placing* one — nudging a six-point
 arrow across the frame means six drags that all have to agree. All four are keyframable, so
 this is also how you fly a whole shape around without touching a point.

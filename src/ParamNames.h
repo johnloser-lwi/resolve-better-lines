@@ -95,6 +95,7 @@ constexpr const char* kParamImportShow  = "importEnabled";
 constexpr const char* kParamXfPos    = "xformPosition";
 constexpr const char* kParamXfRot    = "xformRotation";
 constexpr const char* kParamXfScale  = "xformScale";
+constexpr const char* kParamXfLink   = "xformScaleLink";
 constexpr const char* kParamXfAnchor = "xformAnchor";
 
 // --- style -------------------------------------------------------------------

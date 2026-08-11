@@ -27,6 +27,7 @@
 #include "render/CudaRender.h"
 #endif
 
+#include <cmath>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -229,6 +230,18 @@ private:
     OFX::DoubleParam*   _xfRot    = nullptr;
     OFX::Double2DParam* _xfScale  = nullptr;
     OFX::Double2DParam* _xfAnchor = nullptr;
+    OFX::BooleanParam*  _xfLink   = nullptr;
+
+    void syncLinkedScale(double time);
+
+    /// Last scale seen, so a change can be attributed to X or to Y.
+    ///
+    /// changedParam names the PARAMETER that changed, never which component of
+    /// it -- so with a single Double2D there is no other way to know which of
+    /// the two the user just dragged, and mirroring the wrong one would undo
+    /// the edit as fast as it was made.
+    double _lastScaleX = 1.0, _lastScaleY = 1.0;
+    bool   _syncingScale = false;
 
     OFX::RGBAParam*    _color      = nullptr;
     OFX::DoubleParam*  _opacity    = nullptr;
@@ -395,6 +408,12 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _xfRot    = fetchDoubleParam(kParamXfRot);
     _xfScale  = fetchDouble2DParam(kParamXfScale);
     _xfAnchor = fetchDouble2DParam(kParamXfAnchor);
+    _xfLink   = fetchBooleanParam(kParamXfLink);
+
+    // Seeded from the actual value, not from the default: a project reopened
+    // with a non-uniform scale would otherwise look like X had just been edited
+    // and the link would flatten Y on the first unrelated change.
+    try { _xfScale->getValue(_lastScaleX, _lastScaleY); } catch (...) {}
 
     _color      = fetchRGBAParam(kParamColor);
     _opacity    = fetchDoubleParam(kParamOpacity);
@@ -780,6 +799,53 @@ void BetterLinePlugin::importSvg()
     bl::ProbeLog("svg import: " + o.str() + (r.sawArc ? "  [arcs converted]" : ""));
 }
 
+/** @brief Mirror whichever scale axis the user just changed onto the other.
+ *
+ * Written with the same keyframe rule the overlay uses: on an animated
+ * parameter a plain setValue edits the static value underneath the animation,
+ * which the curve then overrides -- so the mirrored axis would silently refuse
+ * to follow on exactly the shapes someone bothered to animate.
+ */
+void BetterLinePlugin::syncLinkedScale(double time)
+{
+    if (_syncingScale) return;
+
+    try
+    {
+        bool link = true;
+        _xfLink->getValueAtTime(time, link);
+
+        double x = 1.0, y = 1.0;
+        _xfScale->getValueAtTime(time, x, y);
+
+        if (!link) { _lastScaleX = x; _lastScaleY = y; return; }
+
+        const bool movedX = std::fabs(x - _lastScaleX) > 1e-9;
+        const bool movedY = std::fabs(y - _lastScaleY) > 1e-9;
+
+        double nx = x, ny = y;
+        if      (movedX && !movedY) ny = x;
+        else if (movedY && !movedX) nx = y;
+        else if (movedX && movedY)  { _lastScaleX = x; _lastScaleY = y; return; }
+        else                        return;   // nothing actually changed
+
+        if (std::fabs(nx - x) > 1e-12 || std::fabs(ny - y) > 1e-12)
+        {
+            _syncingScale = true;
+            {
+                bl::EditBlock block(this, "Link Scale");
+                if (_xfScale->getNumKeys() > 0) _xfScale->setValueAtTime(time, nx, ny);
+                else                            _xfScale->setValue(nx, ny);
+            }
+            _syncingScale = false;
+        }
+
+        _lastScaleX = nx;
+        _lastScaleY = ny;
+    }
+    catch (...) { _syncingScale = false; }
+}
+
 void BetterLinePlugin::syncPresetFolderLabel()
 {
     // Shown resolved rather than as "(default)": the point of the read-out is to
@@ -844,11 +910,11 @@ void BetterLinePlugin::syncVisibility()
     catch (...) {}   // a stranded control is bad; a throw into the host is worse
 }
 
-void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& /*p_Args*/,
+void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
                                     const std::string& p_ParamName)
 {
     bl::ProbeScope _t("changedParam");
-    if (_syncingEase) return;
+    if (_syncingEase || _syncingScale) return;
 
     // While a preset is being written, every setValue dispatches back here.
     // Reacting to each would run syncVisibility hundreds of times for one Load,
@@ -880,6 +946,37 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& /*p_Args*/,
             return;
         }
         syncPresetFolderLabel();
+        return;
+    }
+
+    if (p_ParamName == kParamXfScale) { syncLinkedScale(p_Args.time); return; }
+    if (p_ParamName == kParamXfLink)
+    {
+        // Turning the link ON snaps Y to X, so "linked" is true immediately
+        // rather than only from the next edit onwards -- a toggle that says the
+        // axes are linked while they hold different values is just wrong.
+        try
+        {
+            bool link = false;
+            _xfLink->getValueAtTime(p_Args.time, link);
+            if (link)
+            {
+                double x = 1.0, y = 1.0;
+                _xfScale->getValueAtTime(p_Args.time, x, y);
+                if (std::fabs(x - y) > 1e-9)
+                {
+                    _syncingScale = true;
+                    {
+                        bl::EditBlock block(this, "Link Scale");
+                        if (_xfScale->getNumKeys() > 0) _xfScale->setValueAtTime(p_Args.time, x, x);
+                        else                            _xfScale->setValue(x, x);
+                    }
+                    _syncingScale = false;
+                }
+                _lastScaleX = _lastScaleY = x;
+            }
+        }
+        catch (...) { _syncingScale = false; }
         return;
     }
 
@@ -1851,6 +1948,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
                      "Degrees, about the Anchor.", 0.0, -100000.0, 100000.0, -180.0, 180.0);
 
         xy(kParamXfScale, "Scale", "About the Anchor.", 1.0, 1.0, 0.0, 3.0);
+
+        DefineBool(p_Desc, page, g, kParamXfLink, "Link Scale",
+                   "Keeps X and Y together, so one edit scales proportionally. Turn "
+                   "off to stretch on one axis.", true);
 
         xy(kParamXfAnchor, "Anchor",
            "The point rotation and scale pivot around, as a fraction of the frame. "
