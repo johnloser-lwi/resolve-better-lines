@@ -52,7 +52,12 @@ enum DragKind
     /// kDragTanOut while dragging, but is distinguished so that a Ctrl press
     /// which never moves can collapse the handle back to a corner. Clicking a
     /// handle TIP is not the same gesture and must not collapse anything.
-    kDragTanPull
+    kDragTanPull,
+
+    /// Rubber-band selection, dragged from empty space.
+    kDragMarquee,
+    /// Moving every selected point at once.
+    kDragMulti
 };
 
 class BetterLineInteract : public OFX::OverlayInteract
@@ -86,6 +91,8 @@ private:
     void insertPoint(int s, int at, double nx, double ny, double t);
     void deletePoint(int s, int at);
     void abandonDrag();
+
+    bool isSelected(int stroke, int index) const;
 
     /// Fetched on first use; see the note in the constructor.
     OFX::Double2DParam* pos(int s, int i) const
@@ -188,6 +195,23 @@ private:
     DragKind  _drag = kDragNone;
     PointRef  _dragRef;
     PointRef  _selected;
+
+    /// Multi-point selection.
+    ///
+    /// A rounded rectangle is the case that forced this. Its corners are
+    /// circular arcs baked into points, so making it wider with a non-uniform
+    /// Transform scale stretches those arcs into ellipses -- the shape cannot be
+    /// reproportioned by the transform without deforming the very thing the
+    /// corner radius was for. Moving one side's points together does it exactly,
+    /// because it lengthens the straight edges and leaves every fillet alone.
+    std::vector<PointRef>  _selection;
+    /// Each selected point's canonical position when the drag began. Deltas are
+    /// applied to these rather than accumulated, so rounding cannot creep and a
+    /// point cannot drift away from the others over a long drag.
+    std::vector<OfxPointD> _dragOrigin;
+
+    OfxPointD _marqA{0.0, 0.0};
+    OfxPointD _marqB{0.0, 0.0};
     OfxPointD _grab{0.0, 0.0};   ///< canonical offset from pen to the handle
 
     /// Where the pen went down, and whether it has since travelled far enough to
@@ -489,11 +513,19 @@ void BetterLineInteract::deletePoint(int s, int at)
     catch (...) {}
 }
 
+bool BetterLineInteract::isSelected(int stroke, int index) const
+{
+    for (const PointRef& r : _selection)
+        if (r.stroke == stroke && r.index == index) return true;
+    return false;
+}
+
 void BetterLineInteract::abandonDrag()
 {
     if (_drag == kDragNone) return;
     _drag = kDragNone;
     _dragRef = PointRef();
+    _dragOrigin.clear();
 
     // Force rather than a matching EndEdit: this path exists precisely for the
     // case where the matching event never arrived.
@@ -912,7 +944,9 @@ bool BetterLineInteract::draw(const OFX::DrawArgs& args)
             for (int i = 0; i < n; ++i)
             {
                 const OfxPointD p{stroke.pts[i].pos.x, stroke.pts[i].pos.y};
-                const bool sel = (_selected.stroke == s && _selected.index == i);
+                const bool multi = isSelected(s, i);
+                const bool sel   = multi || (_selection.empty() &&
+                                             _selected.stroke == s && _selected.index == i);
 
                 const Vec2& tn = stroke.pts[i].tan;
                 const bool corner = (tn.x == 0.0f && tn.y == 0.0f);
@@ -937,6 +971,20 @@ bool BetterLineInteract::draw(const OFX::DrawArgs& args)
                     DrawHandle(c, p, 8.5, false);
                 }
             }
+        }
+
+        // The rubber band, drawn last so it sits over the geometry it is
+        // selecting rather than under it.
+        if (_drag == kDragMarquee && _dragMoved)
+        {
+            SetColour(c, 1.0f, 0.95f, 0.3f, 0.9f);
+            SetLineWidth(c, 1.0f);
+            const OfxPointD a{_marqA.x, _marqA.y};
+            const OfxPointD b{_marqB.x, _marqB.y};
+            DrawLine(c, {a.x, a.y}, {b.x, a.y});
+            DrawLine(c, {b.x, a.y}, {b.x, b.y});
+            DrawLine(c, {b.x, b.y}, {a.x, b.y});
+            DrawLine(c, {a.x, b.y}, {a.x, a.y});
         }
 
         drawImported(c);
@@ -1106,14 +1154,27 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
                 {
                     deletePoint(s, i);
                     if (_selected.stroke == s && _selected.index >= i) _selected.index = -1;
+                    // Every index after the removed one has just shifted down, so
+                    // a selection holding raw indices now points at the wrong
+                    // points -- and the next multi-drag would move them. Cheaper
+                    // and safer to drop it than to renumber it.
+                    _selection.clear();
                     requestRedraw();
                     return true;
                 }
 
-                _selected   = {s, i};
                 _pressPos   = pen;
                 _dragMoved  = false;
                 _dragRef    = {s, i};
+
+                // Grabbing a point that is already in the selection moves the
+                // whole selection; grabbing one outside it drops the selection
+                // and takes just that point. That is the convention every vector
+                // editor uses, and it means multi-point dragging needs no
+                // modifier of its own -- which matters here, because Shift, Alt
+                // and Ctrl are already spoken for.
+                if (!isSelected(s, i)) _selection.clear();
+                _selected = {s, i};
 
                 // Ctrl-drag pulls the handle out of the point itself.
                 //
@@ -1133,11 +1194,24 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
                     return true;
                 }
 
-                _drag = kDragPoint;
-                // Grab offset, so the point does not snap its centre to the
-                // cursor the instant you touch it.
                 _grab = {p.x - pen.x, p.y - pen.y};
-                BeginEdit(_effect, "Drag Point");
+
+                if (_selection.size() > 1)
+                {
+                    _drag = kDragMulti;
+                    _dragOrigin.clear();
+                    _dragOrigin.reserve(_selection.size());
+                    for (const PointRef& r : _selection)
+                        _dragOrigin.push_back(posAt(c, r.stroke, r.index));
+                    BeginEdit(_effect, "Drag Points");
+                }
+                else
+                {
+                    // Grab offset, so the point does not snap its centre to the
+                    // cursor the instant you touch it.
+                    _drag = kDragPoint;
+                    BeginEdit(_effect, "Drag Point");
+                }
                 requestRedraw();
                 return true;
             }
@@ -1186,11 +1260,26 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
                 double nx = 0, ny = 0;
                 c.toNormalised(back.x, back.y, nx, ny);
                 insertPoint(bestS, bestSpan + 1, nx, ny, c.time);
+                _selection.clear();          // indices after the insert have shifted
                 _selected = {bestS, bestSpan + 1};
                 requestRedraw();
                 return true;
             }
         }
+        // Nothing was hit, so the press is the start of a rubber band. This is
+        // free real estate: an empty-space drag previously did nothing at all,
+        // so marquee selection costs no modifier and collides with no gesture.
+        //
+        // Deliberately opens NO edit block -- selecting changes no parameter,
+        // and a block held open across a drag that writes nothing would be an
+        // empty undo step.
+        _drag      = kDragMarquee;
+        _marqA     = pen;
+        _marqB     = pen;
+        _pressPos  = pen;
+        _dragMoved = false;
+        requestRedraw();
+        return true;
     }
     catch (...) { abandonDrag(); return false; }
 
@@ -1269,6 +1358,61 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
         }
         catch (...) { abandonDrag(); return false; }
         return true;
+    }
+
+    // A marquee has no _dragRef to be valid, so it is handled ahead of that gate.
+    if (_drag == kDragMarquee)
+    {
+        _marqB = args.penPosition;
+
+        // Same three-screen-pixel threshold as a point drag, and it decides two
+        // things at once: whether the band is drawn, and whether penUp reads the
+        // gesture as a selection or as a click that clears one.
+        const double dx = (args.penPosition.x - _pressPos.x) / c.pixelScale.x;
+        const double dy = (args.penPosition.y - _pressPos.y) / c.pixelScale.y;
+        if (dx * dx + dy * dy > 9.0) _dragMoved = true;
+
+        requestRedraw();
+        return true;
+    }
+
+    if (_drag == kDragMulti)
+    {
+        try
+        {
+            // One delta, applied to every recorded origin. Axis-locking the
+            // delta rather than each point keeps the selection rigid: locking
+            // per point would let two points snap to different axes and shear
+            // the shape.
+            double dx = args.penPosition.x - _pressPos.x;
+            double dy = args.penPosition.y - _pressPos.y;
+
+            {
+                const double sdx = std::fabs(dx) / c.pixelScale.x;
+                const double sdy = std::fabs(dy) / c.pixelScale.y;
+                if (sdx * sdx + sdy * sdy > 9.0) _dragMoved = true;
+                if (_shiftDown) { if (sdx >= sdy) dy = 0.0; else dx = 0.0; }
+            }
+
+            for (size_t k = 0; k < _selection.size() && k < _dragOrigin.size(); ++k)
+            {
+                const PointRef& r = _selection[k];
+
+                // Back through the transform, exactly as a single-point drag
+                // does: the handles were drawn transformed, so the drag arrives
+                // in transformed space.
+                const Vec2 back = c.xform.ApplyInverse(
+                    Vec2(static_cast<float>(_dragOrigin[k].x + dx),
+                         static_cast<float>(_dragOrigin[k].y + dy)));
+
+                double nx = 0, ny = 0;
+                c.toNormalised(back.x, back.y, nx, ny);
+                writePoint(pos(r.stroke, r.index), c.time, nx, ny);
+            }
+            requestRedraw();
+            return true;
+        }
+        catch (...) { abandonDrag(); return false; }
     }
 
     if (!_dragRef.valid()) return false;
@@ -1382,9 +1526,62 @@ bool BetterLineInteract::penUp(const OFX::PenArgs& args)
         requestRedraw();
     }
 
+    // A marquee opened no edit block, so it must not close one. Calling EndEdit
+    // for a gesture that never called BeginEdit is precisely the unbalanced
+    // begin/end that leaves the host's interact state broken for the rest of the
+    // session -- the reason the edit wrapper is refcounted in the first place.
+    if (_drag == kDragMarquee)
+    {
+        OverlayContext c;
+        if (buildContext(args.time, args.pixelScale, nullptr, c))
+        {
+            // A click that never travelled clears the selection. A drag collects
+            // every point inside the band; Shift adds to what was already there.
+            if (!_dragMoved)
+            {
+                _selection.clear();
+                _selected = PointRef();
+            }
+            else
+            {
+                if (!_shiftDown) _selection.clear();
+
+                const double x0 = std::min(_marqA.x, _marqB.x);
+                const double x1 = std::max(_marqA.x, _marqB.x);
+                const double y0 = std::min(_marqA.y, _marqB.y);
+                const double y1 = std::max(_marqA.y, _marqB.y);
+
+                int strokes = 1;
+                try { if (_strokeCount) _strokeCount->getValueAtTime(c.time, strokes); }
+                catch (...) {}
+                strokes = strokes < 1 ? 1 : (strokes > kMaxStrokes ? kMaxStrokes : strokes);
+
+                for (int s2 = 0; s2 < strokes; ++s2)
+                {
+                    if (!strokeEnabled(s2, c.time)) continue;
+                    const int n = pointCount(s2, c.time);
+                    for (int i2 = 0; i2 < n; ++i2)
+                    {
+                        const OfxPointD q = posAt(c, s2, i2);
+                        if (q.x < x0 || q.x > x1 || q.y < y0 || q.y > y1) continue;
+                        if (!isSelected(s2, i2)) _selection.push_back({s2, i2});
+                    }
+                }
+                if (!_selection.empty()) _selected = _selection.front();
+            }
+        }
+
+        _drag = kDragNone;
+        _dragRef = PointRef();
+        _dragMoved = false;
+        requestRedraw();
+        return true;
+    }
+
     _drag = kDragNone;
     _dragRef = PointRef();
     _dragMoved = false;
+    _dragOrigin.clear();
     EndEdit(_effect);
     return true;
 }

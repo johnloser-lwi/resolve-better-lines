@@ -429,7 +429,42 @@ show a list of numbers.
 | **Alt**-click a point | delete it (refuses below two points) |
 | **Shift**-click near the curve | insert a point there |
 | Click a point | select it, which reveals that stroke's tangent handles |
+| **Drag from empty space** | rubber-band select every point inside |
+| **Shift**-drag from empty space | add those points to the selection |
+| **Drag a selected point** | move the whole selection together |
+| Click empty space | clear the selection |
 | Drag a curve-editor handle | reshape the In or Out easing curve |
+
+### Multi-point selection, and why it exists
+
+A rounded rectangle forced this. Its corners are circular arcs **baked into points**, so
+widening it with a non-uniform Transform scale stretches those arcs into ellipses — the shape
+cannot be reproportioned by the transform without deforming the very thing the corner radius
+was for. Selecting one side's points and moving them together does it exactly: the straight
+edges lengthen and every fillet is left alone.
+
+(The generator's separate **Width** and **Height** cover the same need at creation time. Use
+those when you know the proportions up front; use the selection when you don't.)
+
+- **No modifier of its own.** Dragging a point already in the selection moves the selection;
+  dragging one outside it drops the selection and takes just that point. That is what every
+  vector editor does, and it matters here because Shift, Alt and Ctrl are all already spoken
+  for. Empty-space drag was likewise doing nothing at all, so the rubber band collides with
+  no existing gesture.
+- **The axis lock applies to the delta, not to each point.** Locking per point would let two
+  points snap to different axes and shear the shape.
+- **Deltas are applied to positions recorded at press**, not accumulated frame to frame, so
+  rounding cannot creep and no point can drift away from the others over a long drag.
+- **Inserting or deleting a point clears the selection.** Both shift every later index, so a
+  selection holding raw indices would afterwards point at the wrong points — and the next
+  multi-drag would move them. Dropping it is cheaper and safer than renumbering it.
+- **A marquee opens no edit block.** Selecting writes no parameter, and calling `EndEdit` for
+  a gesture that never called `BeginEdit` is exactly the unbalanced begin/end that leaves the
+  host's interact state broken for the rest of the session.
+
+> **Untested outside Resolve, like the rest of the overlay.** It needs a draw context and pen
+> events, so there is no offline harness for it — see
+> [Phase 0 is not finished](#phase-0-is-not-finished).
 
 ## Presets
 
@@ -497,7 +532,7 @@ placing and sizing a shape needs no per-shape controls at all.
 | **Shape** | Rectangle, Ellipse, Polygon |
 | **Sides** | Polygon only. 3 is a triangle. Range shrinks to 3..8 once Corner Radius leaves zero |
 | **Corner Radius** | % of the shape's *inscribed* radius; ignored by Ellipse |
-| **Size** | % of frame height. A starting point — resize with Transform Scale |
+| **Width**, **Height** | Half-extents, both as a % of frame *height*, so equal values are a true square on any timeline |
 | **Into** | `Next Free` picks the first stroke that is switched off, so adding never overwrites work in progress |
 
 - **Corner Radius is measured against the inscribed radius**, the distance from the centre to
@@ -532,6 +567,11 @@ placing and sizing a shape needs no per-shape controls at all.
   Neither the stretched circle nor the leaning corner can appear in a square test cell, so
   `--sheet check` asserts both numerically — the corner one by requiring every handle of a
   rounded rectangle to be the same length *in pixels* on a 16:9 frame.
+- **Width and Height are separate, rather than one Size plus Transform Scale.** A non-uniform
+  Transform scale stretches the corner fillets from circular arcs into elliptical ones, so a
+  wide rounded rectangle cannot be made by squashing a square one — the proportions have to
+  exist *before* the corners are rounded. To reproportion one after the fact, use
+  [multi-point selection](#multi-point-selection-and-why-it-exists).
 - **Existing keys on the target slot are deleted first.** They describe the shape that used to
   be there and would win at every frame, making the button look like it had done nothing.
 - Shape controls are `AddParamUI`, so they neither invalidate the render cache nor appear in

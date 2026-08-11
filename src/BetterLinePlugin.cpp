@@ -334,7 +334,8 @@ private:
     OFX::ChoiceParam*  _shapeKind   = nullptr;
     OFX::IntParam*     _shapeSides  = nullptr;
     OFX::DoubleParam*  _shapeCorner = nullptr;
-    OFX::DoubleParam*  _shapeSize   = nullptr;
+    OFX::DoubleParam*  _shapeSize   = nullptr;   ///< height
+    OFX::DoubleParam*  _shapeWidth  = nullptr;
     OFX::ChoiceParam*  _shapeSlot   = nullptr;
 
     // --- imported paths ------------------------------------------------------
@@ -502,6 +503,7 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _shapeSides  = fetchIntParam(kParamShapeSides);
     _shapeCorner = fetchDoubleParam(kParamShapeCorner);
     _shapeSize   = fetchDoubleParam(kParamShapeSize);
+    _shapeWidth  = fetchDoubleParam(kParamShapeWidth);
     _shapeSlot   = fetchChoiceParam(kParamShapeSlot);
 
     _importShow  = fetchBooleanParam(kParamImportShow);
@@ -776,10 +778,11 @@ void BetterLinePlugin::addShape()
     const int kind   = ChoiceAt(_shapeKind, 0.0, kShapeRectangle, kShapePolygon);
     const int slotSel = ChoiceAt(_shapeSlot, 0.0, 0, kMaxStrokes);
 
-    double corner = 0.0, sizePct = 40.0;
+    double corner = 0.0, sizePct = 40.0, widthPct = 40.0;
     int    sides  = 6;
     _shapeCorner->getValue(corner);
     _shapeSize->getValue(sizePct);
+    _shapeWidth->getValue(widthPct);
     _shapeSides->getValue(sides);
 
     const bool rounded = (kind != kShapeEllipse) && (corner > 0.01);
@@ -835,11 +838,17 @@ void BetterLinePlugin::addShape()
         if (w > 0.0 && h > 0.0) aspect = w / h;
     }
 
-    const float half = static_cast<float>(sizePct) * 0.005f;   // % of height -> half-extent
+    // Both are a percentage of frame HEIGHT, so a square is Width == Height on
+    // any timeline. Separate axes here rather than leaning on Transform Scale,
+    // because a non-uniform scale stretches the corner fillets from circular
+    // arcs into elliptical ones -- the rounding has to be built at the final
+    // proportions to stay circular.
+    const float halfW = static_cast<float>(widthPct) * 0.005f;
+    const float halfH = static_cast<float>(sizePct)  * 0.005f;
 
     std::vector<ControlPoint> pts;
     MakeShape(kind, sides, static_cast<float>(corner) * 0.01f,
-              0.5f, 0.5f, half, half, static_cast<float>(aspect), pts);
+              0.5f, 0.5f, halfW, halfH, static_cast<float>(aspect), pts);
 
     if (pts.size() < 3) return;
     if (pts.size() > static_cast<size_t>(kMaxPoints)) pts.resize(static_cast<size_t>(kMaxPoints));
@@ -2098,14 +2107,31 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
             p->setParent(*g);
             AddParamUI(page, p);
         }
+        // Two axes, not one Size plus Transform Scale. A non-uniform Transform
+        // scale stretches the corner fillets from circular arcs into elliptical
+        // ones, so a wide rounded rectangle cannot be made by squashing a square
+        // one -- the proportions have to exist before the corners are rounded.
+        // Both are a percentage of frame HEIGHT, so equal values are a true
+        // square on any timeline.
+        {
+            OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeWidth);
+            p->setLabels("Width", "Width", "Width");
+            p->setHint("Half-width as a percentage of frame height. Set equal to Height "
+                       "for a square or a circle.");
+            p->setDefault(40.0);
+            p->setRange(1.0, 400.0);
+            p->setDisplayRange(5.0, 120.0);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
         {
             OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeSize);
-            p->setLabels("Size", "Size", "Size");
-            p->setHint("Size as a percentage of frame height. Only a starting point -- "
-                       "use Transform Scale to size the shape once it is placed.");
+            p->setLabels("Height", "Height", "Height");
+            p->setHint("Half-height as a percentage of frame height.");
             p->setDefault(40.0);
-            p->setRange(1.0, 200.0);
-            p->setDisplayRange(5.0, 100.0);
+            p->setRange(1.0, 400.0);
+            p->setDisplayRange(5.0, 120.0);
             p->setAnimates(false);
             p->setParent(*g);
             AddParamUI(page, p);
