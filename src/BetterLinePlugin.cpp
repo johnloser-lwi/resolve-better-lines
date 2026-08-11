@@ -393,7 +393,10 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     bl::ProbeHostOnce();
 
     _dstClip = fetchClip(kOfxImageEffectOutputClipName);
-    _srcClip = fetchClip(kOfxImageEffectSimpleSourceClipName);
+    // Absent in the generator context, where fetching it throws. Its own try, so
+    // that a throw cannot skip the fetches that follow.
+    try { _srcClip = fetchClip(kOfxImageEffectSimpleSourceClipName); }
+    catch (...) { _srcClip = nullptr; }
 
     _strokeCount = fetchIntParam(kParamStrokeCount);
     for (int s = 0; s < kMaxStrokes; ++s)
@@ -841,12 +844,18 @@ void BetterLinePlugin::addShape()
     // with equal radii comes out stretched by the frame aspect. The generators
     // divide x by this to undo that; without it a "circle" on a 16:9 timeline is
     // an ellipse nearly twice as wide as it is tall.
+    // The OUTPUT clip when there is no input -- which is always the case in the
+    // generator context, and also whenever an effect sits on an unconnected
+    // input. Falling back rather than assuming 1.0 keeps a circle round.
     double aspect = 1.0;
-    if (_srcClip && _srcClip->isConnected())
     {
-        const OfxRectD rod = _srcClip->getRegionOfDefinition(0.0);
-        const double w = rod.x2 - rod.x1, h = rod.y2 - rod.y1;
-        if (w > 0.0 && h > 0.0) aspect = w / h;
+        OFX::Clip* ref = (_srcClip && _srcClip->isConnected()) ? _srcClip : _dstClip;
+        if (ref)
+        {
+            const OfxRectD rod = ref->getRegionOfDefinition(0.0);
+            const double w = rod.x2 - rod.x1, h = rod.y2 - rod.y1;
+            if (w > 0.0 && h > 0.0) aspect = w / h;
+        }
     }
 
     // Each axis is authored against its own axis of the frame; ShapeExtents does
@@ -1729,6 +1738,13 @@ void BetterLinePluginFactory::describe(OFX::ImageEffectDescriptor& p_Desc)
 
     p_Desc.addSupportedContext(OFX::eContextFilter);
     p_Desc.addSupportedContext(OFX::eContextGeneral);
+    // A line is its own element rather than a treatment of someone else's
+    // picture, so the generator context is the honest description of it. Whether
+    // Resolve surfaces it is the host's business -- OFX has no property that
+    // enumerates the contexts a host will instantiate, so declaring it and
+    // looking is the only way to find out. Declaring one the host ignores costs
+    // nothing.
+    p_Desc.addSupportedContext(OFX::eContextGenerator);
     p_Desc.addSupportedBitDepth(OFX::eBitDepthFloat);
 
     p_Desc.setSingleInstance(false);
@@ -1880,15 +1896,48 @@ OFX::BooleanParamDescriptor* DefineBool(OFX::ImageEffectDescriptor& desc,
 
 } // namespace
 
-void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
-                                                OFX::ContextEnum /*p_Context*/)
+namespace {
+
+/// For the probe log. OFX offers no property listing the contexts a host will
+/// instantiate, so the only way to learn whether Resolve supports the generator
+/// context is to declare it and record what the host asks for.
+const char* ContextName(OFX::ContextEnum c)
 {
-    OFX::ClipDescriptor* srcClip = p_Desc.defineClip(kOfxImageEffectSimpleSourceClipName);
-    srcClip->addSupportedComponent(OFX::ePixelComponentRGBA);
-    srcClip->setTemporalClipAccess(false);
-    srcClip->setSupportsTiles(false);
-    srcClip->setIsMask(false);
-    srcClip->setOptional(true);
+    switch (c)
+    {
+    case OFX::eContextGenerator:  return "generator";
+    case OFX::eContextFilter:     return "filter";
+    case OFX::eContextTransition: return "transition";
+    case OFX::eContextPaint:      return "paint";
+    case OFX::eContextGeneral:    return "general";
+    case OFX::eContextRetimer:    return "retimer";
+    default:                      return "none";
+    }
+}
+
+} // namespace
+
+void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
+                                                OFX::ContextEnum p_Context)
+{
+    // Two separate facts, and only both together answer the question. The host
+    // describes every context it knows about, but describing one is not a promise
+    // that the user can ever create it -- that is what the createInstance line
+    // below records.
+    bl::ProbeOnce(std::string("describe-") + ContextName(p_Context),
+                  std::string("describeInContext: ") + ContextName(p_Context));
+
+    // A generator has no inputs by definition, so the source clip is not merely
+    // unused there -- it must not be described at all.
+    if (p_Context != OFX::eContextGenerator)
+    {
+        OFX::ClipDescriptor* srcClip = p_Desc.defineClip(kOfxImageEffectSimpleSourceClipName);
+        srcClip->addSupportedComponent(OFX::ePixelComponentRGBA);
+        srcClip->setTemporalClipAccess(false);
+        srcClip->setSupportsTiles(false);
+        srcClip->setIsMask(false);
+        srcClip->setOptional(true);
+    }
 
     OFX::ClipDescriptor* dstClip = p_Desc.defineClip(kOfxImageEffectOutputClipName);
     dstClip->addSupportedComponent(OFX::ePixelComponentRGBA);
@@ -2738,8 +2787,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
 }
 
 OFX::ImageEffect* BetterLinePluginFactory::createInstance(OfxImageEffectHandle p_Handle,
-                                                          OFX::ContextEnum /*p_Context*/)
+                                                          OFX::ContextEnum p_Context)
 {
+    bl::ProbeOnce(std::string("instance-") + ContextName(p_Context),
+                  std::string("createInstance: ") + ContextName(p_Context));
     return new BetterLinePlugin(p_Handle);
 }
 

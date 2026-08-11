@@ -499,6 +499,43 @@ those when you know the proportions up front; use the selection when you don't.)
 > events, so there is no offline harness for it — see
 > [Phase 0 is not finished](#phase-0-is-not-finished).
 
+## Generator context (experimental)
+
+A line is its own element rather than a treatment of someone else's picture, so **generator**
+is the honest description of it. The plugin declares `eContextGenerator` alongside Filter and
+General.
+
+**Whether Resolve surfaces it is unverified.** OFX has no host property that enumerates the
+contexts a host will instantiate, so declaring one and looking is the only way to find out.
+Declaring a context the host ignores costs nothing, which is why it is in.
+
+To check, install, restart Resolve, and read `%LOCALAPPDATA%\BetterLine\probe.log`:
+
+```
+describeInContext: generator     <- Resolve knows about the context
+createInstance: generator        <- and will actually let you make one
+```
+
+The two are different facts. A host describes every context it knows; describing one is not a
+promise the user can ever create it. **Only the `createInstance` line settles it.**
+
+What the context changes, and how little of it there was:
+
+- **No source clip.** A generator has no inputs, so the clip is not merely unused — it must
+  not be described at all. `fetchClip` on a clip that was never described *throws*, so both
+  the plugin and the overlay fetch it in their own `try`, or a throw would take the output
+  clip down with it and the overlay would lose the region of definition it falls back to.
+- **The render already worked.** It takes its region of definition from `dst->getBounds()`,
+  not from the source, and both the CPU loop and the CUDA kernel already treat a null source
+  as transparent black — the CPU path `memset`s the row, the kernel zeroes the pixel. Neither
+  needed a line changed.
+- **The aspect for Add Shape** falls back to the output clip, which also fixes the case of an
+  effect sitting on an unconnected input.
+
+If Resolve ignores the context, the honest workflow remains an **Adjustment Clip**: drop one
+on a track with nothing beneath it and apply Better Line. That is the same thing a generator
+would give you, and it works today.
+
 ## Presets
 
 Resolve gives OFX plugins no preset mechanism of its own, so this is one: **Save Preset**,

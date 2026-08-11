@@ -231,9 +231,16 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
 {
     (void)p_Effect;   // the base class has already stored it as _effect
 
+    // The source clip does NOT exist in the generator context, and fetching a
+    // clip that was never defined throws. Fetched in its own try so that a throw
+    // here cannot take the OUTPUT clip down with it -- the overlay already falls
+    // back to the output for its region of definition, but only if it managed to
+    // fetch one.
+    try { _srcClip = _effect->fetchClip(kOfxImageEffectSimpleSourceClipName); }
+    catch (...) { _srcClip = nullptr; }
+
     try
     {
-        _srcClip = _effect->fetchClip(kOfxImageEffectSimpleSourceClipName);
         _dstClip = _effect->fetchClip(kOfxImageEffectOutputClipName);
 
         _strokeCount = _effect->fetchIntParam(kParamStrokeCount);
