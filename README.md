@@ -478,6 +478,66 @@ control characters and empty strings, and asserts that malformed input is reject
 
 *Not saved:* keyframe curves. A preset stores each parameter's current value.
 
+## SVG import
+
+**Import SVG** reads path geometry into a second store that sits alongside the keyframable
+point slots.
+
+The split is the point. Slots exist so Resolve can keyframe an *individual* point, which costs
+two parameters each and caps the plugin at 4 x 16 = 64 points. Real artwork is nowhere near
+that — one of the test files is **19 subpaths and 258 points**, four times the entire slot
+budget, and any logo containing text is far worse (two subpaths per letter). But an imported
+logo is exactly the thing nobody keyframes point-by-point: it gets placed, scaled and drawn
+on, which Transform and Trim already do. So it lives in one string parameter with no ceiling.
+
+Imported paths share everything else — style, transform, trim, dashes, stagger, animation.
+
+### What it reads
+
+All of `M/L/H/V/C/S/Q/T/A/Z`, absolute and relative, plus `rect`, `circle`, `ellipse`, `line`,
+`polygon` and `polyline`. Transforms on the element and on every ancestor `<g>`, including
+`matrix`, `translate`, `scale`, `rotate` (with and without a centre), `skewX` and `skewY`.
+
+- **Quadratics are exact.** A quadratic *is* a cubic whose controls sit two thirds of the way
+  from each endpoint to the quadratic control.
+- **Arcs are converted** via the endpoint-to-centre parameterisation, split into segments of
+  at most 90° — a single cubic cannot usefully represent more than a quarter ellipse.
+- **Numbers may run together.** `M0,0L10-5L20,0` is legal SVG and `.5.5` is two numbers, so
+  the scanner cannot simply hand the rest of the string to `strtod`.
+- **`<defs>`, `<clipPath>`, `<mask>`, `<symbol>`, `<pattern>` and `<marker>` are skipped.** This
+  is required, not a refinement: a clip path is described with the same `<path>` element as
+  real artwork, so a scanner that takes every path in the file imports the clipping rectangle
+  as a shape. An Inkscape export did exactly that and came in with a large square across the
+  whole logo.
+
+### Coordinates
+
+Blob coordinates are **square units** — y spans the frame height and x is scaled by the height
+too, then centred. Slot points use width for x, which is right for hand-placed geometry and
+wrong for artwork: stretching x by the frame aspect would import a circle as an ellipse. The
+document is fitted to its longer axis so nothing is cropped, and SVG's y-down axis is flipped
+to this plugin's y-up here, once.
+
+The blob is parsed once and cached against the string it came from. Reparsing tens of
+kilobytes every frame would make the per-frame cost scale with how detailed the artwork is,
+which is exactly backwards.
+
+### Limitations
+
+- **Geometry only.** Fills, gradients, per-shape colours, stroke widths, masks and filters are
+  ignored — the plugin's own style controls decide the look. A multi-coloured logo imports as
+  one colour; per-shape colour needs the per-stroke style override, which is still outstanding.
+- **Fill applies to closed subpaths only.** Line-art SVGs are open paths and will stroke but
+  not fill, which is correct — there is no inside to fill.
+- **Text must be converted to outlines first.** There is no font rasterizer here.
+- Imported paths are not editable point-by-point in the overlay. Use Transform, or edit the
+  path data string by hand.
+
+`linetest out.png --svg file.svg [--fill]` imports and renders a real file offline, through
+the blob round-trip, so what you see is what would actually be stored. `--sheet check` asserts
+the command set, including relative forms, implicit linetos, run-together numbers and packed
+arc flags — a relative command that lands plausibly is not something visual inspection catches.
+
 ### Global transform
 
 `Position`, `Rotation`, `Scale` and `Anchor` move every stroke together. Editing points one

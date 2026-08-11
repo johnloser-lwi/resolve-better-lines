@@ -84,6 +84,13 @@ constexpr const char* kParamPresetFolder = "presetFolder";
 constexpr const char* kParamPresetSetDir = "presetSetFolder";
 constexpr const char* kParamPresetReset  = "presetReset";
 
+// --- imported paths ----------------------------------------------------------
+constexpr const char* kParamImportSvg   = "importSvg";
+constexpr const char* kParamClearImport = "clearImport";
+constexpr const char* kParamPathBlob    = "pathData";
+constexpr const char* kParamImportInfo  = "importInfo";
+constexpr const char* kParamImportShow  = "importEnabled";
+
 // --- global transform --------------------------------------------------------
 constexpr const char* kParamXfPos    = "xformPosition";
 constexpr const char* kParamXfRot    = "xformRotation";

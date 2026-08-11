@@ -15,7 +15,9 @@
 #include "core/Anim.h"
 #include "core/Easing.h"
 #include "core/Geometry.h"
+#include "core/PathBlob.h"
 #include "core/PathBuild.h"
+#include "core/SvgPath.h"
 #include "core/Raster.h"
 #include "core/TileGrid.h"
 
@@ -321,6 +323,22 @@ private:
     OFX::StringParam* _presetName   = nullptr;
     OFX::StringParam* _presetFolder = nullptr;
 
+    // --- imported paths ------------------------------------------------------
+    void importSvg();
+
+    OFX::BooleanParam* _importShow = nullptr;
+    OFX::StringParam*  _pathBlob   = nullptr;
+    OFX::StringParam*  _importInfo = nullptr;
+
+    /// Parsed blob, kept until the string changes.
+    ///
+    /// An imported logo is tens of kilobytes of text and reparsing it on every
+    /// frame would be a per-frame cost that scales with how detailed the artwork
+    /// is -- exactly the wrong way round, since detail is what someone imports
+    /// artwork for.
+    mutable std::string         _blobCache;
+    mutable std::vector<Stroke> _blobStrokes;
+
     /// Suppresses the per-parameter reactions while a whole preset is being
     /// written. Without it every one of ~240 setValue calls would dispatch back
     /// into changedParam, and syncVisibility alone would run hundreds of times
@@ -459,6 +477,10 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
         _stAntic[i]    = fetchDoubleParam(StageParam(kStageAntic, out));
         _stOver[i]     = fetchDoubleParam(StageParam(kStageOver, out));
     }
+
+    _importShow = fetchBooleanParam(kParamImportShow);
+    _pathBlob   = fetchStringParam(kParamPathBlob);
+    _importInfo = fetchStringParam(kParamImportInfo);
 
     _presetName   = fetchStringParam(kParamPresetName);
     _presetFolder = fetchStringParam(kParamPresetFolder);
@@ -720,6 +742,44 @@ void BetterLinePlugin::resetAll()
     syncVisibility();
 }
 
+void BetterLinePlugin::importSvg()
+{
+    // Outside any edit block: the dialog pumps its own message loop.
+    std::string path;
+    if (!ChoosePresetToOpen(PresetFolder(), path)) return;
+
+    std::string text, error;
+    if (!ReadTextFile(path, text, error))
+    {
+        sendMessage(OFX::Message::eMessageError, "", "Could not read the file:\n" + error);
+        return;
+    }
+
+    const SvgImportResult r = ParseSvg(text);
+    if (!r.error.empty() || r.strokes.empty())
+    {
+        sendMessage(OFX::Message::eMessageError, "",
+                    "Could not import that SVG:\n" +
+                    (r.error.empty() ? std::string("no path geometry found") : r.error) +
+                    "\n\nOnly path geometry is read -- text must be converted to "
+                    "outlines first, and images cannot be imported.");
+        return;
+    }
+
+    {
+        bl::EditBlock block(this, "Import SVG");
+        _pathBlob->setValue(StrokesToBlob(r.strokes));
+        _importShow->setValue(true);
+    }
+
+    std::ostringstream o;
+    o << StemOf(path) << ": " << r.subpaths << " paths, " << r.points << " points";
+    if (r.truncated) o << " (TRUNCATED -- the file was larger than the import limit)";
+    _importInfo->setValue(o.str());
+
+    bl::ProbeLog("svg import: " + o.str() + (r.sawArc ? "  [arcs converted]" : ""));
+}
+
 void BetterLinePlugin::syncPresetFolderLabel()
 {
     // Shown resolved rather than as "(default)": the point of the read-out is to
@@ -794,6 +854,15 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& /*p_Args*/,
     // Reacting to each would run syncVisibility hundreds of times for one Load,
     // and would let an easing control stamp Custom over a preset's own preset.
     if (_applyingPreset) return;
+
+    if (p_ParamName == kParamImportSvg)    { importSvg(); return; }
+    if (p_ParamName == kParamClearImport)
+    {
+        bl::EditBlock block(this, "Clear Import");
+        _pathBlob->setValue("");
+        _importInfo->setValue("nothing imported");
+        return;
+    }
 
     if (p_ParamName == kParamPresetSave)   { savePreset(); return; }
     if (p_ParamName == kParamPresetLoad)   { loadPreset(); return; }
@@ -1080,16 +1149,71 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
     // a quarter of the visible resolution.
     const float tol = static_cast<float>(0.2 * (renderScale > 0.0 ? renderScale : 1.0));
 
-    Polyline poly;
-    for (int s = 0; s < strokes; ++s)
+    // Imported geometry, parsed once and cached against the string it came from.
+    const std::vector<Stroke>* imported = nullptr;
+    if (BoolAt(_importShow, t))
     {
-        if (!BoolAt(_sEnable[s], t)) continue;
+        std::string blob;
+        _pathBlob->getValue(blob);
+        if (!blob.empty())
+        {
+            if (blob != _blobCache)
+            {
+                BlobToStrokes(blob, _blobStrokes);
+                _blobCache = blob;
+            }
+            if (!_blobStrokes.empty()) imported = &_blobStrokes;
+        }
+        else if (!_blobCache.empty())
+        {
+            _blobCache.clear();
+            _blobStrokes.clear();
+        }
+    }
 
+    const int importedCount = imported ? static_cast<int>(imported->size()) : 0;
+    const int totalStrokes  = strokes + importedCount;
+
+    Polyline poly;
+    for (int s = 0; s < totalStrokes; ++s)
+    {
+        const bool isImported = (s >= strokes);
+        if (!isImported && !BoolAt(_sEnable[s], t)) continue;
+
+        Stroke stroke;
+
+        if (isImported)
+        {
+            // Blob coordinates are SQUARE units: x is scaled by the frame HEIGHT
+            // and centred, so an imported circle stays circular. Slot points use
+            // width for x, which is right for hand-placed geometry and wrong for
+            // artwork that has a shape of its own.
+            const Stroke& src = (*imported)[static_cast<size_t>(s - strokes)];
+            stroke.closed = src.closed;
+            stroke.pts.reserve(src.pts.size());
+
+            for (const ControlPoint& in : src.pts)
+            {
+                ControlPoint cp;
+                cp.pos = BlobToPixels(in.pos, static_cast<float>(rod.x1),
+                                      static_cast<float>(rod.y1),
+                                      static_cast<float>(w), static_cast<float>(h));
+                cp.tan = BlobVectorToPixels(in.tan, static_cast<float>(h));
+
+                if (!xf.IsIdentity())
+                {
+                    cp.pos = xf.Apply(cp.pos);
+                    cp.tan = xf.ApplyVector(cp.tan);
+                }
+                stroke.pts.push_back(cp);
+            }
+        }
+        else
+        {
         int n = 2;
         _sCount[s]->getValueAtTime(t, n);
         n = n < 2 ? 2 : (n > kMaxPoints ? kMaxPoints : n);
 
-        Stroke stroke;
         stroke.closed = BoolAt(_sClosed[s], t);
         stroke.pts.reserve(static_cast<size_t>(n));
 
@@ -1117,6 +1241,7 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
             }
 
             stroke.pts.push_back(cp);
+        }
         }
 
         FlattenStroke(stroke, tol, poly);
@@ -1149,7 +1274,7 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
         if (animOn)
         {
             const float delay = staggerFrames *
-                static_cast<float>(StaggerIndex(s, strokes, staggerOrder,
+                static_cast<float>(StaggerIndex(s, totalStrokes, staggerOrder,
                                                 static_cast<unsigned>(staggerSeed)));
 
             ApplyStages(sIn, sOut,
@@ -1643,6 +1768,59 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
             tan->setIsSecret(DefaultPointSecret(s, i));
             tan->setParent(*g);
             AddParam(page, tan);
+        }
+    }
+
+    // --- imported paths ------------------------------------------------------
+    {
+        OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "importGroup", "Import");
+
+        DefineBool(p_Desc, page, g, kParamImportShow, "Show Imported Path",
+                   "Draw the imported geometry. Turn off to work on the hand-drawn "
+                   "strokes without deleting the import.", true);
+
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamImportSvg);
+            p->setLabels("Import SVG...", "Import SVG...", "Import SVG...");
+            p->setHint("Reads path geometry only -- fills, gradients and text are "
+                       "ignored. Imported paths have no point limit, but are edited as "
+                       "a whole through Transform and Trim rather than point by point.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamClearImport);
+            p->setLabels("Clear Import", "Clear Import", "Clear Import");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::StringParamDescriptor* p = p_Desc.defineStringParam(kParamImportInfo);
+            p->setLabels("Imported", "Imported", "Imported");
+            p->setStringType(OFX::eStringTypeSingleLine);
+            p->setDefault("nothing imported");
+            p->setEnabled(false);
+            p->setIsPersistant(false);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            // The geometry itself. Registered normally, so it travels in presets
+            // and in the project like any other value -- it IS the artwork.
+            //
+            // Not animatable: it is topology, and a shape that changed its point
+            // count between frames would make every arc-length derived feature
+            // (trim, dashes, gradients) mean something different each frame.
+            OFX::StringParamDescriptor* p = p_Desc.defineStringParam(kParamPathBlob);
+            p->setLabels("Path Data", "Path Data", "Path Data");
+            p->setHint("Imported geometry. Editable by hand, but it is normally written "
+                       "by Import SVG.");
+            p->setStringType(OFX::eStringTypeSingleLine);
+            p->setDefault("");
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParam(page, p);
         }
     }
 

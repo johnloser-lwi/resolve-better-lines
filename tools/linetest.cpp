@@ -15,13 +15,17 @@
 
 #include "Preset.h"
 #include "core/Geometry.h"
+#include "core/PathBlob.h"
 #include "core/PathBuild.h"
+#include "core/SvgPath.h"
 #include "core/Raster.h"
 #include "core/TileGrid.h"
 
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1070,8 +1074,169 @@ int main(int argc, char** argv)
             }
         }
 
+        // SVG path commands. Visual inspection catches a wrong SHAPE; it does
+        // not catch a relative command that happens to land plausibly, or an
+        // implicit-lineto rule applied to the wrong command.
+        {
+            int bad = 0;
+            auto check = [&](const char* what, const char* d, int wantSubpaths,
+                             int wantPoints, bool wantClosed) {
+                std::vector<Stroke> got;
+                bool arc = false;
+                ParsePathData(d, got, arc, 10000);
+
+                int pts = 0;
+                for (const Stroke& s : got) pts += static_cast<int>(s.pts.size());
+
+                const bool closedOk = got.empty() ? false : (got[0].closed == wantClosed);
+                if (static_cast<int>(got.size()) != wantSubpaths || pts != wantPoints || !closedOk)
+                {
+                    std::printf("  %-22s got %zu subpaths / %d points / closed=%d,"
+                                " wanted %d / %d / %d\n",
+                                what, got.size(), pts, got.empty() ? -1 : (int)got[0].closed,
+                                wantSubpaths, wantPoints, (int)wantClosed);
+                    ++bad;
+                }
+            };
+
+            check("absolute line",   "M0,0 L10,0 L10,10 Z",        1, 3, true);
+            check("relative line",   "m0,0 l10,0 l0,10 z",         1, 3, true);
+            // H and V take one number each, and repeat without recommand.
+            check("H/V runs",        "M0,0 H10 20 V5 Z",           1, 4, true);
+            // A repeated moveto pair is an implicit LINETO, not another moveto.
+            check("implicit lineto", "M0,0 5,5 10,0",              1, 3, false);
+            check("two subpaths",    "M0,0 L1,0 M5,5 L6,5",        2, 4, false);
+            check("cubic",           "M0,0 C1,1 2,1 3,0",          1, 2, false);
+            check("smooth cubic",    "M0,0 C1,1 2,1 3,0 S5,-1 6,0",1, 3, false);
+            check("quadratic",       "M0,0 Q1,2 2,0",              1, 2, false);
+            check("smooth quad",     "M0,0 Q1,2 2,0 T4,0",         1, 3, false);
+            // Numbers may run together with no separator at all.
+            check("packed numbers",  "M0,0L10-5L20,0",             1, 3, false);
+
+            {   // An arc becomes several cubics; the exact count is the
+                // implementation's business, but it must produce SOMETHING and
+                // must report that it saw one.
+                std::vector<Stroke> got;
+                bool arc = false;
+                ParsePathData("M0,0 A5,5 0 0 1 10,0", got, arc, 10000);
+                if (!arc || got.empty() || got[0].pts.size() < 2)
+                { std::printf("  arc produced nothing\n"); ++bad; }
+            }
+            {   // Packed arc flags: "0 011 1" is flags 0 and 1 then the endpoint.
+                std::vector<Stroke> got;
+                bool arc = false;
+                ParsePathData("M0,0 a5 5 0 011 10,0", got, arc, 10000);
+                if (!arc || got.empty()) { std::printf("  packed arc flags failed\n"); ++bad; }
+            }
+
+            std::printf("svg path commands: %s\n", bad == 0 ? "ok" : "FAILED");
+            failures += bad;
+        }
+
         std::printf("check: %d failures\n", failures);
         return failures == 0 ? 0 : 1;
+    }
+
+    // Import a real SVG and render it, which is the only way to find out whether
+    // the parser produced the shape the file describes.
+    //   linetest out.png --svg file.svg [--fill]
+    {
+        const char* svgPath = nullptr;
+        bool wantFill = false;
+        for (int i = 2; i < argc; ++i)
+        {
+            if (std::strcmp(argv[i], "--svg") == 0 && i + 1 < argc) svgPath = argv[i + 1];
+            if (std::strcmp(argv[i], "--fill") == 0) wantFill = true;
+        }
+
+        if (svgPath)
+        {
+            std::ifstream f(svgPath, std::ios::binary);
+            if (!f) { std::fprintf(stderr, "cannot open %s\n", svgPath); return 1; }
+            std::ostringstream ss; ss << f.rdbuf();
+
+            const SvgImportResult r = ParseSvg(ss.str());
+            std::printf("svg: %s\n", svgPath);
+            std::printf("  subpaths=%d points=%d arcs=%s truncated=%s\n",
+                        r.subpaths, r.points, r.sawArc ? "yes" : "no",
+                        r.truncated ? "YES" : "no");
+            if (!r.error.empty()) { std::printf("  ERROR: %s\n", r.error.c_str()); return 1; }
+
+            // Round-trip through the blob, so what is rendered is what would
+            // actually be stored rather than the parser's own output.
+            const std::string blob = StrokesToBlob(r.strokes);
+            std::vector<Stroke> back;
+            BlobToStrokes(blob, back);
+            std::printf("  blob=%zu bytes, %zu subpaths after round-trip\n",
+                        blob.size(), back.size());
+
+            const int size = cell;
+            std::vector<float> rgba(static_cast<size_t>(size) * size * 4, 0.0f);
+
+            Style st;
+            st.halfWidth = size / 300.0f;
+            st.feather   = 1.2f;
+            st.color     = Color(1.0f, 0.9f, 0.5f, 1.0f);
+            st.fill      = wantFill;
+            st.fillColor = Color(0.25f, 0.55f, 0.9f, 1.0f);
+            st.fillOpacity = 0.85f;
+
+            std::vector<Segment>  segs;
+            std::vector<FillEdge> fill;
+            TrimState trim;
+
+            for (size_t k = 0; k < back.size(); ++k)
+            {
+                Stroke s = back[k];
+                for (ControlPoint& p : s.pts)
+                {
+                    // Same square mapping the plugin uses, on a square cell.
+                    p.pos = BlobToPixels(p.pos, 0.0f, 0.0f,
+                                         static_cast<float>(size), static_cast<float>(size));
+                    p.tan = BlobVectorToPixels(p.tan, static_cast<float>(size));
+                }
+
+                Polyline poly;
+                FlattenStroke(s, 0.2f, poly);
+                if (st.fill && s.closed) AppendFillContour(poly.pts, 0, fill);
+                BuildStrokeSegments(poly, st, trim, s.closed, 0.0f, 0.0f, 0.0f, segs);
+            }
+
+            TileGrid grid;
+            BuildTileGrid(segs, st.MaxReach() + 1.0f, 0, 0, size, size, 16, grid);
+            BandGrid bands;
+            BuildBandGrid(fill, st.feather + 1.0f, 0, size, 16, bands);
+
+            SceneView scene;
+            scene.segs = segs.empty() ? nullptr : segs.data();
+            scene.segCount = static_cast<int>(segs.size());
+            scene.grid = grid.View();
+            scene.fill = fill.empty() ? nullptr : fill.data();
+            scene.fillCount = static_cast<int>(fill.size());
+            scene.bands = bands.View();
+            scene.styles = &st;
+            scene.styleCount = 1;
+
+            ShadeRect(scene, rgba.data(), size * 4, 0, 0, size, size);
+            std::printf("  segments=%zu fillEdges=%zu\n", segs.size(), fill.size());
+
+            std::vector<unsigned char> img(static_cast<size_t>(size) * size * 3, 0);
+            for (int y = 0; y < size; ++y)
+                for (int x = 0; x < size; ++x)
+                {
+                    const float* px = &rgba[(static_cast<size_t>(y) * size + x) * 4];
+                    const float chk = (((x >> 4) + (y >> 4)) & 1) ? 0.16f : 0.10f;
+                    unsigned char* dst = &img[((static_cast<size_t>(size - 1 - y) * size) + x) * 3];
+                    for (int c2 = 0; c2 < 3; ++c2)
+                        dst[c2] = static_cast<unsigned char>(
+                            Saturate(::powf(Saturate(px[c2] + chk * (1.0f - px[3])), 1.0f / 2.2f)) * 255.0f + 0.5f);
+                }
+
+            if (!stbi_write_png(outPath, size, size, 3, img.data(), size * 3))
+            { std::fprintf(stderr, "failed to write %s\n", outPath); return 1; }
+            std::printf("wrote %s (%dx%d)\n", outPath, size, size);
+            return 0;
+        }
     }
 
     std::vector<Case> cases;

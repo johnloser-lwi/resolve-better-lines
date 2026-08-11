@@ -96,6 +96,7 @@ add_library(BetterLine MODULE
     src/HostProbe.cpp
     src/Preset.cpp
     src/PresetIO.cpp
+    src/core/SvgPath.cpp
     src/interact/Overlay.cpp
 )
 target_include_directories(BetterLine PRIVATE src)
@@ -119,7 +120,7 @@ set_target_properties(BetterLine PROPERTIES
 # antialiasing quality, caps, dash boundaries and taper continuity get judged.
 # Preset.cpp is deliberately free of OFX and Win32, so the harness links it and
 # the JSON schema is exercised with no host in the loop.
-add_executable(linetest tools/linetest.cpp src/Preset.cpp)
+add_executable(linetest tools/linetest.cpp src/Preset.cpp src/core/SvgPath.cpp)
 target_include_directories(linetest PRIVATE src third_party/stb)
 
 # Not everything the harness knows is a picture. The stagger ordering has to be
