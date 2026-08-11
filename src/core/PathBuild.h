@@ -64,6 +64,7 @@ inline Vec2 InsetVertex(Vec2 v, Vec2 prev, Vec2 next, float r)
  * @return the number of segments appended.
  */
 inline size_t EmitRun(const Polyline& poly, float d0, float d1,
+                      float sA, float sB,
                       const Style& st, std::vector<Segment>& out)
 {
     const float total = poly.Total();
@@ -73,12 +74,28 @@ inline size_t EmitRun(const Polyline& poly, float d0, float d1,
     d1 = Clamp(d1, 0.0f, total);
     if (d1 - d0 <= 1e-5f) return 0;
 
-    // Taper is a lerp on normalised arc length, so it stays continuous across
-    // dash boundaries -- the dashes of a tapered line thin out along the run
-    // rather than each dash tapering individually.
-    auto radiusAt = [&st, total](float d) {
-        const float s = total > 1e-6f ? Saturate(d / total) : 0.0f;
-        return Max(st.halfWidth * WidthProfile(s, st.widthStart, st.widthMid, st.widthEnd),
+    // The taper parameter is supplied by the caller as its values at the two ends
+    // of this run, rather than being derived from arc length here.
+    //
+    // That indirection is the whole feature. Derived from arc length, the profile
+    // is pinned to the PATH: trim reveals a slice of a fixed taper, so a draw-on
+    // stroke starts thick wherever the reveal happens to begin and only thins at
+    // the path's own far end. Supplied by the caller, the same code maps the
+    // profile across the VISIBLE window instead, and the leading tip is tapered
+    // wherever it currently is. Passing the path-absolute values reproduces the
+    // old behaviour exactly, which is what the Style flag selects between.
+    //
+    // Still a lerp on arc length WITHIN the run, so a tapered line that is also
+    // dashed thins out along the run rather than each dash tapering individually.
+    const float dSpan = d1 - d0;
+    auto tAt = [d0, dSpan, sA, sB](float d) {
+        const float k = (dSpan > 1e-6f) ? Saturate((d - d0) / dSpan) : 0.0f;
+        return sA + (sB - sA) * k;
+    };
+
+    auto radiusAt = [&st, &tAt](float d) {
+        return Max(st.halfWidth * WidthProfile(Saturate(tAt(d)),
+                                               st.widthStart, st.widthMid, st.widthEnd),
                    0.0f);
     };
     auto sAt = [total](float d) { return total > 1e-6f ? Saturate(d / total) : 0.0f; };
@@ -118,9 +135,16 @@ inline size_t EmitRun(const Polyline& poly, float d0, float d1,
     // Subdivision is therefore driven by the PROFILE as well as by curvature,
     // and only when the profile is actually curved -- a straight taper still
     // costs one segment.
+    // Measured against the arc length over which the profile completes ONE full
+    // sweep, not against the path length. When the taper follows a short trimmed
+    // window the profile changes just as much over far less distance, so a step
+    // derived from the path would under-sample it badly -- the leaf taper would
+    // reappear as the flat-topped shape that a single round cone can represent.
     const float linearMid = 0.5f * (st.widthStart + st.widthEnd);
     const bool  curvedProfile = (::fabsf(st.widthMid - linearMid) > 1e-4f);
-    const float profileStep   = curvedProfile ? Max(total / 48.0f, 1.0f) : 0.0f;
+    const float sweep  = ::fabsf(sB - sA);
+    const float sweepD = (sweep > 1e-6f) ? (dSpan / sweep) : total;
+    const float profileStep   = curvedProfile ? Max(sweepD / 48.0f, 1.0f) : 0.0f;
 
     auto emit = [&](Vec2 p, float d) {
         const Vec2  a0   = prev;
@@ -217,15 +241,24 @@ inline size_t EmitRun(const Polyline& poly, float d0, float d1,
 
 /** @brief Split a run into dashes and emit each as its own run. */
 inline void EmitDashed(const Polyline& poly, float d0, float d1,
+                       float sA, float sB,
                        const Style& st, float dashLen, float gapLen, float phase,
                        std::vector<Segment>& out)
 {
+    // Each dash gets the slice of the taper domain that its position in the run
+    // earns it, so the profile stays continuous across the gaps.
+    const float runSpan = d1 - d0;
+    auto tOf = [d0, runSpan, sA, sB](float d) {
+        const float k = (runSpan > 1e-6f) ? Saturate((d - d0) / runSpan) : 0.0f;
+        return sA + (sB - sA) * k;
+    };
+
     // A non-positive gap is not a dash pattern, it is a solid line with extra
     // steps -- and a non-positive dash would step forever. Both are reachable
     // from the Inspector, so both fall back rather than hang.
     if (dashLen <= 1e-4f || gapLen <= 1e-4f)
     {
-        EmitRun(poly, d0, d1, st, out);
+        EmitRun(poly, d0, d1, sA, sB, st, out);
         return;
     }
 
@@ -242,7 +275,9 @@ inline void EmitDashed(const Polyline& poly, float d0, float d1,
     const int maxDashes = 4096;
     for (int n = 0; n < maxDashes && t < d1; ++n, t += period)
     {
-        EmitRun(poly, Max(t, d0), Min(t + dashLen, d1), st, out);
+        const float e0 = Max(t, d0);
+        const float e1 = Min(t + dashLen, d1);
+        EmitRun(poly, e0, e1, tOf(e0), tOf(e1), st, out);
     }
 }
 
@@ -283,13 +318,18 @@ inline void BuildStrokeSegments(const Polyline& poly, const Style& st,
     const bool strokeVisible = (st.halfWidth > 0.0f) &&
                                (st.widthStart > 0.0f || st.widthMid > 0.0f || st.widthEnd > 0.0f);
 
-    auto run = [&](float u0, float u1) {
+    // The taper domain: the two values the width profile takes at this run's
+    // ends. Path-absolute reproduces the old behaviour exactly; window-relative
+    // is what makes a drawing-on stroke taper at the tip it currently has.
+    auto run = [&](float u0, float u1, float sA, float sB) {
         if (!strokeVisible) return;
+        if (!st.taperFollowsTrim) { sA = u0; sB = u1; }
+
         if (dashLen > 0.0f)
-            detail::EmitDashed(poly, u0 * total, u1 * total, st,
+            detail::EmitDashed(poly, u0 * total, u1 * total, sA, sB, st,
                                dashLen, gapLen, dashPhase, out);
         else
-            detail::EmitRun(poly, u0 * total, u1 * total, st, out);
+            detail::EmitRun(poly, u0 * total, u1 * total, sA, sB, st, out);
     };
 
     const bool arrowsOn = (st.arrowStart || st.arrowEnd) &&
@@ -334,8 +374,18 @@ inline void BuildStrokeSegments(const Polyline& poly, const Style& st,
         const float db = b - insetB;
         if (db > da)
         {
-            if (db <= 1.0f) run(da, db);
-            else          { run(da, 1.0f); run(0.0f, db - 1.0f); }
+            // A window across the seam is two runs, but ONE taper: the profile
+            // has to carry over the join rather than restarting, or the seam
+            // becomes a visible step in the width. So the split point is
+            // expressed as its fraction of the window and handed to both halves.
+            if (db <= 1.0f) run(da, db, 0.0f, 1.0f);
+            else
+            {
+                const float w   = db - da;
+                const float cut = (w > 1e-6f) ? (1.0f - da) / w : 1.0f;
+                run(da,  1.0f,      0.0f, cut);
+                run(0.0f, db - 1.0f, cut, 1.0f);
+            }
         }
     }
     else
@@ -353,7 +403,7 @@ inline void BuildStrokeSegments(const Polyline& poly, const Style& st,
         // draw, which is correct: the heads meet and there is no shaft.
         const float da = uStart + insetA;
         const float db = uEnd   - insetB;
-        if (db > da) run(da, db);
+        if (db > da) run(da, db, 0.0f, 1.0f);
     }
 
     // --- arrowheads ----------------------------------------------------------

@@ -199,6 +199,20 @@ struct Style
     float fillOpacity = 1.0f;
     Color fillColor   = Color(0.2f, 0.4f, 0.9f, 1.0f);
 
+    /// Map the width profile across the VISIBLE window rather than the path.
+    ///
+    /// A taper is a statement about the ends of a LINE, and while a trim is
+    /// running the line's ends are not the path's. Pinned to the path, a stroke
+    /// drawing on starts at whatever thickness the profile happens to have where
+    /// the reveal begins and only thins where the path itself ends -- so the
+    /// leading tip, the one place a tapered stroke should obviously come to a
+    /// point, is blunt for the entire animation. The arrowheads already ride the
+    /// trimmed ends for exactly this reason.
+    ///
+    /// Off, the profile stays welded to the path, which is what a brush stroke
+    /// with a deliberate thick spot wants when a trim slides across it.
+    bool  taperFollowsTrim = false;
+
     // --- gradient ------------------------------------------------------------
     int   gradMode  = kGradNone;
     Color gradColor = Color(1.0f, 1.0f, 1.0f, 1.0f);

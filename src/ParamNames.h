@@ -120,6 +120,7 @@ constexpr const char* kParamCap        = "cap";
 constexpr const char* kParamTaperStart = "taperStart";
 constexpr const char* kParamTaperBody  = "taperBody";
 constexpr const char* kParamTaperEnd   = "taperEnd";
+constexpr const char* kParamTaperTrim  = "taperFollowsTrim";
 
 constexpr const char* kParamOutline      = "outline";
 constexpr const char* kParamOutlineWidth = "outlineWidth";

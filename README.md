@@ -413,6 +413,39 @@ path anyone would draw. Output is pixel-identical.
 
 ---
 
+### Taper follows the trim
+
+A taper is a statement about the ends of a **line**, and while a trim is running the line's
+ends are not the path's. Welded to the path, a stroke drawing on begins at whatever thickness
+the profile happens to have where the reveal starts and only thins where the *path* ends — so
+the leading tip, the one place a tapered stroke should obviously come to a point, stays blunt
+for the whole animation. **Taper Follows Trim** (default on) maps the profile across the
+visible window instead. The arrowheads already ride the trimmed ends for exactly this reason.
+
+It changes nothing when nothing is trimmed, which is why it can default on safely.
+
+Mechanically, `EmitRun` no longer derives the taper parameter from arc length. The caller
+passes the profile's value at each end of the run, and the flag chooses between path-absolute
+(the old behaviour, reproduced exactly) and window-relative. Three consequences fall out:
+
+- **Dashes still share one profile.** Each dash receives the slice of the domain its position
+  in the run earns it, so a dashed tapered line thins along the run rather than each dash
+  tapering individually.
+- **A window across the seam of a closed path is two runs but one taper.** The split point is
+  expressed as its fraction of the window and handed to both halves, or the seam would show as
+  a step in the width.
+- **Subdivision is measured against the profile's own sweep**, not the path length. A profile
+  that completes over a short trimmed window changes just as much over far less distance, and
+  a step derived from the path would under-sample it — the leaf taper would come back as the
+  flat-topped shape a single round cone can represent, which is the bug that made taper look
+  broken on straight spans in the first place.
+
+Turn it **off** to weld the profile to the path, which is what a brush stroke with a
+deliberate thick spot wants when a trim slides across it.
+
+`linetest --sheet taper` renders a draw-on at 25 / 50 / 75 / 100% with the flag off and on,
+plus a dashed run and a mid-path window.
+
 ## The overlay
 
 Resolve's OFX host supports neither parametric parameters nor custom parameter interacts, so

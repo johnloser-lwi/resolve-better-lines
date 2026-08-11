@@ -242,6 +242,7 @@ private:
     OFX::DoubleParam*  _taperStart = nullptr;
     OFX::DoubleParam*  _taperBody  = nullptr;
     OFX::DoubleParam*  _taperEnd   = nullptr;
+    OFX::BooleanParam* _taperTrim  = nullptr;
 
     OFX::BooleanParam* _outline      = nullptr;
     OFX::DoubleParam*  _outlineWidth = nullptr;
@@ -424,6 +425,7 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _taperStart = fetchDoubleParam(kParamTaperStart);
     _taperBody  = fetchDoubleParam(kParamTaperBody);
     _taperEnd   = fetchDoubleParam(kParamTaperEnd);
+    _taperTrim  = fetchBooleanParam(kParamTaperTrim);
 
     _outline      = fetchBooleanParam(kParamOutline);
     _outlineWidth = fetchDoubleParam(kParamOutlineWidth);
@@ -1185,6 +1187,7 @@ Style BetterLinePlugin::styleAt(double t, double frameHeight, double renderScale
     st.widthStart = static_cast<float>(DoubleAt(_taperStart, t));
     st.widthMid   = static_cast<float>(DoubleAt(_taperBody, t));
     st.widthEnd   = static_cast<float>(DoubleAt(_taperEnd, t));
+    st.taperFollowsTrim = BoolAt(_taperTrim, t);
 
     st.outline      = BoolAt(_outline, t);
     st.outlineWidth = static_cast<float>(DoubleAt(_outlineWidth, t) * pctToPx);
@@ -2319,6 +2322,13 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
                      1.0, 0.0, 8.0, 0.0, 2.0);
         DefineDouble(p_Desc, page, g, kParamTaperEnd, "Taper End",
                      "Width multiplier at the end of the path.", 1.0, 0.0, 8.0, 0.0, 2.0);
+
+        DefineBool(p_Desc, page, g, kParamTaperTrim, "Taper Follows Trim",
+                   "Measures the taper across the VISIBLE part of the line rather than "
+                   "the whole path, so a stroke drawing on always comes to a point at "
+                   "the tip it currently has. Turn off to weld the profile to the path, "
+                   "which is what a brush stroke with a deliberate thick spot wants when "
+                   "a trim slides across it. No effect when nothing is trimmed.", true);
     }
 
     // --- outline -------------------------------------------------------------

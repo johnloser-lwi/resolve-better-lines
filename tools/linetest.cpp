@@ -819,6 +819,66 @@ std::vector<Case> MakeFillCases()
  * numerically in the `check` sheet instead -- a stretched circle is exactly the
  * kind of bug a square test render cannot show.
  */
+/** @brief A tapered line drawing on, with the taper pinned and following.
+ *
+ * The top row is the old behaviour: the profile is welded to the PATH, so a
+ * partly-revealed stroke is a slice out of a fixed taper and its leading tip is
+ * whatever thickness the profile happens to have there -- blunt. The bottom row
+ * maps the same profile across the visible window, so the tip comes to a point at
+ * every stage of the reveal, which is what a tapered line is for.
+ */
+std::vector<Case> MakeTaperCases()
+{
+    std::vector<Case> cases;
+
+    auto at = [](const char* name, float end, bool follow) {
+        Case c; c.name = name;
+        c.stroke.pts = { CP(36, 70, 70, 60), CP(128, 200, 60, 0), CP(220, 70, 0, -70) };
+        c.style.halfWidth = 13.0f; c.style.feather = 1.2f;
+        c.style.color = Color(1.0f, 1.0f, 1.0f, 1.0f);
+        // A leaf: both ends at nothing, swelling through the body.
+        c.style.widthStart = 0.0f; c.style.widthMid = 1.0f; c.style.widthEnd = 0.0f;
+        c.style.taperFollowsTrim = follow;
+        c.trim.start = 0.0f; c.trim.end = end;
+        return c;
+    };
+
+    cases.push_back(at("pinned  25%", 0.25f, false));
+    cases.push_back(at("pinned  50%", 0.50f, false));
+    cases.push_back(at("pinned  75%", 0.75f, false));
+    cases.push_back(at("pinned 100%", 1.00f, false));
+
+    cases.push_back(at("follows  25%", 0.25f, true));
+    cases.push_back(at("follows  50%", 0.50f, true));
+    cases.push_back(at("follows  75%", 0.75f, true));
+    cases.push_back(at("follows 100%", 1.00f, true));
+
+    {   // Dashed, to confirm the profile still spans the whole visible run rather
+        // than restarting on every dash.
+        Case c = at("follows, dashed", 0.8f, true);
+        c.dashLen = 16.0f; c.gapLen = 9.0f;
+        cases.push_back(c);
+    }
+    {   // Trim from BOTH ends: a window in the middle should be pointed at both
+        // of its ends, since both are open ends of the visible line.
+        Case c = at("follows, mid window", 1.0f, true);
+        c.trim.start = 0.35f; c.trim.end = 0.75f;
+        cases.push_back(c);
+    }
+    {   // The same window pinned, for the direct comparison.
+        Case c = at("pinned, mid window", 1.0f, false);
+        c.trim.start = 0.35f; c.trim.end = 0.75f;
+        cases.push_back(c);
+    }
+    {   // A straight taper (no curved profile) still has to follow.
+        Case c = at("follows, linear 1->0", 0.6f, true);
+        c.style.widthStart = 1.0f; c.style.widthMid = 0.5f; c.style.widthEnd = 0.0f;
+        cases.push_back(c);
+    }
+
+    return cases;
+}
+
 std::vector<Case> MakeShapeCases()
 {
     std::vector<Case> cases;
@@ -1514,6 +1574,7 @@ int main(int argc, char** argv)
     else if (std::strcmp(sheetName, "wiggle") == 0) cases = MakeWiggleCases();
     else if (std::strcmp(sheetName, "sweep") == 0)  cases = MakeSweepCases();
     else if (std::strcmp(sheetName, "shapes") == 0) cases = MakeShapeCases();
+    else if (std::strcmp(sheetName, "taper") == 0)  cases = MakeTaperCases();
     else                                          cases = MakeCases();
 
     const int cols  = 4;
