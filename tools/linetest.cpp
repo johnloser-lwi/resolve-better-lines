@@ -1152,6 +1152,23 @@ int main(int argc, char** argv)
                 strokePx = static_cast<float>(std::atof(argv[i + 1]));
         }
 
+        // Exercises the same global transform the plugin applies to imported
+        // geometry, so "the transform does not move my import" can be answered
+        // with a picture instead of an assumption.
+        float xfRot = 0.0f, xfSx = 1.0f, xfSy = 1.0f, xfOx = 0.0f, xfOy = 0.0f;
+        for (int i = 2; i < argc; ++i)
+        {
+            if (std::strcmp(argv[i], "--rot") == 0 && i + 1 < argc)
+                xfRot = static_cast<float>(std::atof(argv[i + 1]));
+            if (std::strcmp(argv[i], "--scale") == 0 && i + 1 < argc)
+                xfSx = xfSy = static_cast<float>(std::atof(argv[i + 1]));
+            if (std::strcmp(argv[i], "--move") == 0 && i + 2 < argc)
+            {
+                xfOx = static_cast<float>(std::atof(argv[i + 1]));
+                xfOy = static_cast<float>(std::atof(argv[i + 2]));
+            }
+        }
+
         if (svgPath)
         {
             std::ifstream f(svgPath, std::ios::binary);
@@ -1188,6 +1205,10 @@ int main(int argc, char** argv)
             std::vector<FillEdge> fill;
             TrimState trim;
 
+            const Xform2D xf = MakeXform(
+                Vec2(size * 0.5f, size * 0.5f),
+                Vec2(xfOx * size, xfOy * size), xfRot, xfSx, xfSy);
+
             for (size_t k = 0; k < back.size(); ++k)
             {
                 Stroke s = back[k];
@@ -1197,6 +1218,12 @@ int main(int argc, char** argv)
                     p.pos = BlobToPixels(p.pos, 0.0f, 0.0f,
                                          static_cast<float>(size), static_cast<float>(size));
                     p.tan = BlobVectorToPixels(p.tan, static_cast<float>(size));
+
+                    if (!xf.IsIdentity())
+                    {
+                        p.pos = xf.Apply(p.pos);
+                        p.tan = xf.ApplyVector(p.tan);
+                    }
                 }
 
                 Polyline poly;

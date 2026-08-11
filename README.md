@@ -554,6 +554,22 @@ Bezier handles go through the **vector** form: they are offsets from their point
 rotate and scale with the shape but must not be translated. Applying the position to them as
 well would double every handle's length.
 
+**There is an on-screen gizmo**: a centre cross to move, a round handle to rotate and a square
+one to scale, both orbiting with the current rotation so the gizmo reads as attached to what it
+drives. The handles sit at a fixed *screen* radius rather than on the artwork's bounds — an
+imported logo can be any size, and handles that scaled with it would be off the viewport for a
+large one and unclickable for a small one.
+
+Drags are anchored to the press rather than accumulated per event, because accumulating drifts:
+each event's delta is rounded independently. A press exactly on the anchor would make every
+later scale ratio a division by zero, so the press distance has a floor.
+
+**Imported paths are drawn in the overlay too**, ghosted, through the same square mapping and
+the same transform the renderer uses. Without that the overlay showed point handles for
+whatever the slot strokes happened to be while the imported artwork on screen had nothing
+attached to it at all — which reads as "the transform does not affect my import" even though it
+always did.
+
 **The overlay draws handles transformed and writes drags back through the inverse.** Drawing
 untransformed positions would put every handle somewhere the stroke is not, the moment the
 transform is touched; and storing a drag without inverting it would apply the transform a

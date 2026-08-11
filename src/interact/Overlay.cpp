@@ -6,6 +6,7 @@
 #include "ParamNames.h"
 #include "core/Easing.h"
 #include "core/Geometry.h"
+#include "core/PathBlob.h"
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +41,9 @@ enum DragKind
 {
     kDragNone,
     kDragPoint,
+    kDragXfMove,    ///< the transform gizmo's centre
+    kDragXfRot,
+    kDragXfScale,
     kDragCurve1,   ///< the easing curve's first bezier handle
     kDragCurve2,
     kDragTanOut,
@@ -127,6 +131,31 @@ private:
     OFX::Double2DParam* _xfScale  = nullptr;
     OFX::Double2DParam* _xfAnchor = nullptr;
 
+    // --- imported geometry ---------------------------------------------------
+    // Drawn so it can be SEEN. Without this the overlay shows point handles for
+    // whatever the slot strokes happen to be while the artwork on screen has
+    // nothing attached to it at all, which reads as "the transform does not
+    // affect my import" even when it does.
+    OFX::BooleanParam* _importShow = nullptr;
+    OFX::StringParam*  _pathBlob   = nullptr;
+
+    mutable std::string         _blobCache;
+    mutable std::vector<Stroke> _blobStrokes;
+
+    const std::vector<Stroke>& importedStrokes() const;
+    void drawImported(const OverlayContext& c);
+
+    // --- transform gizmo -----------------------------------------------------
+    OfxPointD gizmoAnchor(const OverlayContext& c) const;
+    OfxPointD gizmoHandle(const OverlayContext& c, int which) const;
+    void      drawGizmo(const OverlayContext& c);
+
+    OfxPointD _xfPress{0.0, 0.0};
+    double    _xfOrigX = 0.0, _xfOrigY = 0.0;
+    double    _xfOrigRot = 0.0;
+    double    _xfOrigSx = 1.0, _xfOrigSy = 1.0;
+    double    _xfPressAngle = 0.0, _xfPressDist = 1.0;
+
     OFX::BooleanParam* _showCurve  = nullptr;
     OFX::ChoiceParam*  _curveStage = nullptr;
     OFX::DoubleParam*  _easeIn[2]  = {};
@@ -195,6 +224,9 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
         _xfRot    = _effect->fetchDoubleParam(kParamXfRot);
         _xfScale  = _effect->fetchDouble2DParam(kParamXfScale);
         _xfAnchor = _effect->fetchDouble2DParam(kParamXfAnchor);
+
+        _importShow = _effect->fetchBooleanParam(kParamImportShow);
+        _pathBlob   = _effect->fetchStringParam(kParamPathBlob);
 
         _showCurve  = _effect->fetchBooleanParam(kParamShowCurve);
         _curveStage = _effect->fetchChoiceParam(kParamCurveStage);
@@ -458,6 +490,108 @@ void BetterLineInteract::abandonDrag()
     // Force rather than a matching EndEdit: this path exists precisely for the
     // case where the matching event never arrived.
     ForceCloseEdits(_effect);
+}
+
+// --- imported geometry and the transform gizmo -------------------------------
+
+const std::vector<Stroke>& BetterLineInteract::importedStrokes() const
+{
+    std::string blob;
+    try { if (_pathBlob) _pathBlob->getValue(blob); } catch (...) {}
+
+    if (blob != _blobCache)
+    {
+        BlobToStrokes(blob, _blobStrokes);
+        _blobCache = blob;
+    }
+    return _blobStrokes;
+}
+
+void BetterLineInteract::drawImported(const OverlayContext& c)
+{
+    bool show = false;
+    try { if (_importShow) _importShow->getValueAtTime(c.time, show); } catch (...) {}
+    if (!show) return;
+
+    const std::vector<Stroke>& src = importedStrokes();
+    if (src.empty()) return;
+
+    const double w = c.rod.x2 - c.rod.x1;
+    const double h = c.rod.y2 - c.rod.y1;
+
+    SetLineWidth(c, 1.0f);
+    SetColour(c, 0.55f, 0.8f, 0.6f, 0.5f);
+
+    for (const Stroke& s : src)
+    {
+        Stroke t = s;
+        for (ControlPoint& p : t.pts)
+        {
+            // The same square mapping and the same transform the renderer uses,
+            // or the guide would sit somewhere the artwork is not.
+            p.pos = c.xform.Apply(BlobToPixels(p.pos,
+                        static_cast<float>(c.rod.x1), static_cast<float>(c.rod.y1),
+                        static_cast<float>(w), static_cast<float>(h)));
+            p.tan = c.xform.ApplyVector(BlobVectorToPixels(p.tan, static_cast<float>(h)));
+        }
+
+        FlattenStroke(t, Max(static_cast<float>(c.sx(1.0)), 0.1f), _poly);
+        if (_poly.pts.size() < 2) continue;
+
+        _screen.clear();
+        _screen.reserve(_poly.pts.size());
+        for (const Vec2& v : _poly.pts) _screen.push_back({v.x, v.y});
+
+        DrawPrim(c, t.closed ? kOfxDrawPrimitiveLineLoop : kOfxDrawPrimitiveLineStrip,
+                 _screen.data(), static_cast<int>(_screen.size()));
+    }
+}
+
+OfxPointD BetterLineInteract::gizmoAnchor(const OverlayContext& c) const
+{
+    double ax = 0.5, ay = 0.5;
+    try { if (_xfAnchor) _xfAnchor->getValueAtTime(c.time, ax, ay); } catch (...) {}
+    return c.toCanonical(ax, ay);
+}
+
+/** @brief Rotate (0) and scale (1) handles, on a fixed on-screen radius.
+ *
+ * Screen-sized rather than tied to the artwork's bounds: an imported logo can be
+ * any size, and handles that scaled with it would be off the viewport for a
+ * large one and unclickable for a small one. They orbit with the current
+ * rotation so the gizmo reads as attached to the thing it drives.
+ */
+OfxPointD BetterLineInteract::gizmoHandle(const OverlayContext& c, int which) const
+{
+    double rot = 0.0;
+    try { if (_xfRot) _xfRot->getValueAtTime(c.time, rot); } catch (...) {}
+
+    const OfxPointD a = gizmoAnchor(c);
+    const double r    = (rot + (which == 0 ? 90.0 : 0.0)) * 3.14159265358979 / 180.0;
+    return { a.x + c.sx(58.0) * std::cos(r), a.y + c.sy(58.0) * std::sin(r) };
+}
+
+void BetterLineInteract::drawGizmo(const OverlayContext& c)
+{
+    const OfxPointD a   = gizmoAnchor(c);
+    const OfxPointD rot = gizmoHandle(c, 0);
+    const OfxPointD scl = gizmoHandle(c, 1);
+
+    SetLineWidth(c, 1.0f);
+    SetColour(c, 0.4f, 0.9f, 0.7f, 0.5f);
+    DrawLine(c, a, rot);
+    DrawLine(c, a, scl);
+
+    // Centre: a cross rather than a filled dot, so the artwork underneath the
+    // anchor stays visible while it is being placed.
+    SetColour(c, 0.3f, 1.0f, 0.8f, 0.95f);
+    DrawLine(c, {a.x - c.sx(9.0), a.y}, {a.x + c.sx(9.0), a.y});
+    DrawLine(c, {a.x, a.y - c.sy(9.0)}, {a.x, a.y + c.sy(9.0)});
+    DrawDisc(c, a, 5.0);
+
+    SetColour(c, 0.3f, 1.0f, 0.8f, 0.95f);
+    DrawDisc(c, rot, 4.5);
+    DrawHandle(c, scl, 4.0, true);
 }
 
 // --- easing curve editor -----------------------------------------------------
@@ -797,6 +931,9 @@ bool BetterLineInteract::draw(const OFX::DrawArgs& args)
             }
         }
 
+        drawImported(c);
+        drawGizmo(c);
+
         // Last, so it sits over the path handles -- and hit-tested first below,
         // for the same reason.
         if (curveVisible(c.time)) drawCurve(c);
@@ -869,6 +1006,45 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
             // Swallow anything else inside the panel, so a miss near a handle
             // does not fall through and start dragging a point behind it.
             if (Contains(curveRect(c), pen)) return true;
+        }
+
+        // The gizmo is hit-tested before the point handles: it is the coarse
+        // control, it is drawn over them, and a point that happens to sit under
+        // the anchor should not steal the drag that was aimed at the gizmo.
+        {
+            const OfxPointD a   = gizmoAnchor(c);
+            const OfxPointD rot = gizmoHandle(c, 0);
+            const OfxPointD scl = gizmoHandle(c, 1);
+
+            int kind = kDragNone;
+            if      (NearPoint(c, pen, rot, 9.0)) kind = kDragXfRot;
+            else if (NearPoint(c, pen, scl, 9.0)) kind = kDragXfScale;
+            else if (NearPoint(c, pen, a,   9.0)) kind = kDragXfMove;
+
+            if (kind != kDragNone)
+            {
+                try
+                {
+                    _xfPos->getValueAtTime(c.time, _xfOrigX, _xfOrigY);
+                    _xfRot->getValueAtTime(c.time, _xfOrigRot);
+                    _xfScale->getValueAtTime(c.time, _xfOrigSx, _xfOrigSy);
+                }
+                catch (...) { return false; }
+
+                _xfPress      = pen;
+                _xfPressAngle = std::atan2(pen.y - a.y, pen.x - a.x);
+                _xfPressDist  = std::sqrt((pen.x - a.x) * (pen.x - a.x) +
+                                          (pen.y - a.y) * (pen.y - a.y));
+                // A press exactly on the anchor would make every later ratio a
+                // division by zero, and the shape would collapse on first move.
+                if (_xfPressDist < 1e-9) _xfPressDist = 1e-9;
+
+                _drag      = static_cast<DragKind>(kind);
+                _dragMoved = false;
+                _pressPos  = pen;
+                BeginEdit(_effect, "Transform");
+                return true;
+            }
         }
 
         const int strokes = strokeCount(c.time);
@@ -1018,6 +1194,47 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
 
     OverlayContext c;
     if (!buildContext(args.time, args.pixelScale, nullptr, c)) return false;
+
+    // Gizmo drags act on the transform parameters, not on any point.
+    if (_drag == kDragXfMove || _drag == kDragXfRot || _drag == kDragXfScale)
+    {
+        try
+        {
+            const double w = c.rod.x2 - c.rod.x1;
+            const double h = c.rod.y2 - c.rod.y1;
+            if (w <= 0.0 || h <= 0.0) return false;
+
+            if (_drag == kDragXfMove)
+            {
+                // Anchored to the press, not accumulated per event: accumulating
+                // drifts, because each event's delta is rounded independently.
+                _xfPos->setValue(_xfOrigX + (args.penPosition.x - _xfPress.x) / w,
+                                 _xfOrigY + (args.penPosition.y - _xfPress.y) / h);
+            }
+            else
+            {
+                const OfxPointD a = gizmoAnchor(c);
+                const double dx = args.penPosition.x - a.x;
+                const double dy = args.penPosition.y - a.y;
+
+                if (_drag == kDragXfRot)
+                {
+                    const double ang = std::atan2(dy, dx);
+                    _xfRot->setValue(_xfOrigRot +
+                                     (ang - _xfPressAngle) * 180.0 / 3.14159265358979);
+                }
+                else
+                {
+                    const double d = std::sqrt(dx * dx + dy * dy);
+                    const double k = d / _xfPressDist;
+                    _xfScale->setValue(_xfOrigSx * k, _xfOrigSy * k);
+                }
+            }
+            requestRedraw();
+        }
+        catch (...) { abandonDrag(); return false; }
+        return true;
+    }
 
     // The curve handles are not points on a path, so they carry no PointRef.
     if (_drag == kDragCurve1 || _drag == kDragCurve2)
