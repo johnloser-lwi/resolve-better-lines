@@ -201,6 +201,8 @@ public:
     void changedParam(const OFX::InstanceChangedArgs& p_Args,
                       const std::string& p_ParamName) override;
     void getClipPreferences(OFX::ClipPreferencesSetter& p_ClipPreferences) override;
+    bool getRegionOfDefinition(const OFX::RegionOfDefinitionArguments& p_Args,
+                               OfxRectD& p_Rod) override;
 
 private:
     void  syncVisibility();
@@ -1177,6 +1179,67 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
 void BetterLinePlugin::getClipPreferences(OFX::ClipPreferencesSetter& p_ClipPreferences)
 {
     p_ClipPreferences.setOutputFrameVarying(true);
+
+    // With no input to inherit from, the output's premultiplication defaults to
+    // OPAQUE -- and an opaque declaration tells the host to ignore the alpha we
+    // spent the whole render computing. The transparent background then composites
+    // as solid black over everything beneath it, which does not look like a
+    // premultiplication mistake; it looks like the plugin destroyed the timeline.
+    //
+    // The pixels really are premultiplied: the compositor scales all four channels
+    // together, which is the same convention Resolve hands filters their input in.
+    if (!_srcClip || !_srcClip->isConnected())
+    {
+        p_ClipPreferences.setOutputPremultiplication(OFX::eImagePreMultiplied);
+        if (_dstClip)
+            p_ClipPreferences.setClipComponents(*_dstClip, OFX::ePixelComponentRGBA);
+    }
+}
+
+/** @brief Supply a region of definition when there is no input to infer one from.
+ *
+ * The default RoD is "the union of the RoDs of all input clips". A generator has
+ * no input clips, so that union is EMPTY -- and an empty RoD is not a harmless
+ * default, it is a degenerate output: nothing renders, and whatever the host had
+ * in that buffer stays there. That is the whole of the "instantiates fine,
+ * renders garbage" symptom, and it cannot be fixed downstream because by render
+ * time the buffer is already the wrong size.
+ *
+ * The project extent is the right answer: a generator with no inputs has no
+ * opinion smaller than the frame it is being asked to fill.
+ *
+ * Deliberately keyed on whether an input is actually CONNECTED rather than on the
+ * context, so an effect-context instance sitting on an unconnected input gets the
+ * same treatment instead of inheriting the same empty union.
+ */
+bool BetterLinePlugin::getRegionOfDefinition(const OFX::RegionOfDefinitionArguments& /*p_Args*/,
+                                             OfxRectD& p_Rod)
+{
+    if (_srcClip && _srcClip->isConnected()) return false;   // host default is right
+
+    OfxPointD off = {0.0, 0.0};
+    OfxPointD size = {0.0, 0.0};
+    try { off  = getProjectOffset(); } catch (...) {}
+    try { size = getProjectSize();   } catch (...) {}
+
+    // Extent is the fallback: hosts differ over whether "size" is populated for
+    // every project type, and a zero here would put us straight back to the empty
+    // RoD this function exists to avoid.
+    if (size.x <= 0.0 || size.y <= 0.0)
+    {
+        try { size = getProjectExtent(); } catch (...) {}
+    }
+    if (size.x <= 0.0 || size.y <= 0.0) return false;
+
+    p_Rod.x1 = off.x;
+    p_Rod.y1 = off.y;
+    p_Rod.x2 = off.x + size.x;
+    p_Rod.y2 = off.y + size.y;
+
+    bl::ProbeOnce("genrod", "generator RoD: " +
+                  std::to_string(p_Rod.x1) + "," + std::to_string(p_Rod.y1) + " .. " +
+                  std::to_string(p_Rod.x2) + "," + std::to_string(p_Rod.y2));
+    return true;
 }
 
 /** @brief Never a pass-through.
@@ -1926,6 +1989,13 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
     // below records.
     bl::ProbeOnce(std::string("describe-") + ContextName(p_Context),
                   std::string("describeInContext: ") + ContextName(p_Context));
+
+    // Distinct name for the generator, so the two entries are told apart in a
+    // host that lists both. The context descriptor is a specialisation of the
+    // plugin-level one, so a host that ignores per-context labels simply keeps
+    // the name set in describe().
+    if (p_Context == OFX::eContextGenerator)
+        p_Desc.setLabels(kPluginNameGenerator, kPluginNameGenerator, kPluginNameGenerator);
 
     // A generator has no inputs by definition, so the source clip is not merely
     // unused there -- it must not be described at all.

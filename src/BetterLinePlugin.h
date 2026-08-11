@@ -3,6 +3,7 @@
 #include "ofxsImageEffect.h"
 
 #define kPluginName        "Better Line"
+#define kPluginNameGenerator "Better Line Generator"
 #define kPluginGrouping    "BetterLine"
 #define kPluginDescription "Editable, styleable, animatable lines and curves."
 #define kPluginIdentifier  "com.resolvebetterline.BetterLine"

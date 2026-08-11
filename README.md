@@ -499,27 +499,34 @@ those when you know the proportions up front; use the selection when you don't.)
 > events, so there is no offline harness for it — see
 > [Phase 0 is not finished](#phase-0-is-not-finished).
 
-## Generator context (experimental)
+## Generator context
 
 A line is its own element rather than a treatment of someone else's picture, so **generator**
-is the honest description of it. The plugin declares `eContextGenerator` alongside Filter and
-General.
+is the honest description of it. **Resolve supports it** — measured, not assumed: `probe.log`
+records `createInstance: generator`, which is the fact that settles it (a host describes every
+context it knows about, so `describeInContext` alone would only mean Resolve parsed the
+declaration). It appears as **Better Line Generator**, labelled per context so the two entries
+are told apart.
 
-**Whether Resolve surfaces it is unverified.** OFX has no host property that enumerates the
-contexts a host will instantiate, so declaring one and looking is the only way to find out.
-Declaring a context the host ignores costs nothing, which is why it is in.
+Two defaults have to be overridden, and both fail in ways that look nothing like their cause.
+Neither is reachable in the Filter context, where the input is always connected — which is why
+both survived until the generator was tried.
 
-To check, install, restart Resolve, and read `%LOCALAPPDATA%\BetterLine\probe.log`:
+- **The default region of definition is "the union of the RoDs of all input clips".** A
+  generator has no input clips, so that union is **empty**. An empty RoD is not a harmless
+  default: nothing renders, and whatever the host left in the buffer stays there. It cannot be
+  fixed at render time either, because by then the buffer is already the wrong size.
+  `getRegionOfDefinition` returns the **project extent** instead.
+- **With no input to inherit from, the output premultiplication defaults to opaque.** An opaque
+  declaration tells the host to ignore the alpha the render just computed, so the transparent
+  background composites as solid black over everything beneath. That does not look like a
+  premultiplication mistake — it looks like the plugin destroyed the timeline.
 
-```
-describeInContext: generator     <- Resolve knows about the context
-createInstance: generator        <- and will actually let you make one
-```
+Both are keyed on whether an input is actually **connected**, not on the context, so an
+effect-context instance sitting on an unconnected input gets the same treatment rather than
+inheriting the same empty union.
 
-The two are different facts. A host describes every context it knows; describing one is not a
-promise the user can ever create it. **Only the `createInstance` line settles it.**
-
-What the context changes, and how little of it there was:
+What else the context changes, and how little of it there was:
 
 - **No source clip.** A generator has no inputs, so the clip is not merely unused — it must
   not be described at all. `fetchClip` on a clip that was never described *throws*, so both
