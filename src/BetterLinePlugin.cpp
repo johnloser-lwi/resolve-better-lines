@@ -337,6 +337,7 @@ private:
     OFX::DoubleParam*  _shapeCorner = nullptr;
     OFX::DoubleParam*  _shapeSize   = nullptr;   ///< height
     OFX::DoubleParam*  _shapeWidth  = nullptr;
+    OFX::BooleanParam* _shapeLink   = nullptr;
     OFX::ChoiceParam*  _shapeSlot   = nullptr;
 
     // --- imported paths ------------------------------------------------------
@@ -506,6 +507,7 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _shapeCorner = fetchDoubleParam(kParamShapeCorner);
     _shapeSize   = fetchDoubleParam(kParamShapeSize);
     _shapeWidth  = fetchDoubleParam(kParamShapeWidth);
+    _shapeLink   = fetchBooleanParam(kParamShapeLink);
     _shapeSlot   = fetchChoiceParam(kParamShapeSlot);
 
     _importShow  = fetchBooleanParam(kParamImportShow);
@@ -787,6 +789,13 @@ void BetterLinePlugin::addShape()
     _shapeWidth->getValue(widthPct);
     _shapeSides->getValue(sides);
 
+    // Locked, Width is simply NOT READ, exactly as Transform's linked Scale Y is
+    // not read. Mirroring one control into the other instead means a visible
+    // round trip that loses track whenever the host coalesces events -- which is
+    // how the linked transform scale used to desync.
+    bool linkWH = true;
+    _shapeLink->getValue(linkWH);
+
     const bool rounded = (kind != kShapeEllipse) && (corner > 0.01);
 
     // Rounding costs two points per corner, so a polygon that fits sharp may not
@@ -840,13 +849,12 @@ void BetterLinePlugin::addShape()
         if (w > 0.0 && h > 0.0) aspect = w / h;
     }
 
-    // Both are a percentage of frame HEIGHT, so a square is Width == Height on
-    // any timeline. Separate axes here rather than leaning on Transform Scale,
-    // because a non-uniform scale stretches the corner fillets from circular
-    // arcs into elliptical ones -- the rounding has to be built at the final
-    // proportions to stay circular.
-    const float halfW = static_cast<float>(widthPct) * 0.005f;
-    const float halfH = static_cast<float>(sizePct)  * 0.005f;
+    // Each axis is authored against its own axis of the frame; ShapeExtents does
+    // the conversion into the square units the geometry is built in. It lives in
+    // core/ rather than here so the unit maths is reachable by the offline tests,
+    // which is the only way a "100% is not 100%" mistake gets caught.
+    float halfW = 0.0f, halfH = 0.0f;
+    ShapeExtents(widthPct, sizePct, linkWH, static_cast<float>(aspect), halfW, halfH);
 
     std::vector<ControlPoint> pts;
     MakeShape(kind, sides, static_cast<float>(corner) * 0.01f,
@@ -986,6 +994,13 @@ void BetterLinePlugin::syncVisibility()
             _shapeSides->setIsSecret(kind != kShapePolygon);
             _shapeCorner->setIsSecret(kind == kShapeEllipse);
 
+            // Hidden while locked, because it is not read while locked. A number
+            // on screen that has no effect is the confusion the lock exists to
+            // remove, not one to introduce.
+            bool linkWH = true;
+            _shapeLink->getValue(linkWH);
+            _shapeWidth->setIsSecret(linkWH);
+
             // Rounding costs two points per corner, so the achievable side count
             // halves the moment the radius leaves zero. Moving the RANGE rather
             // than only validating on the button press means the control cannot
@@ -1061,6 +1076,7 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
     if (p_ParamName == kParamShapeAdd)     { addShape(); return; }
     // The radius decides how many sides still fit, so it drives visibility too.
     if (p_ParamName == kParamShapeKind ||
+        p_ParamName == kParamShapeLink ||
         p_ParamName == kParamShapeCorner)  { syncVisibility(); return; }
 
     if (p_ParamName == kParamImportSvg)    { importSvg(); return; }
@@ -2114,16 +2130,19 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         // scale stretches the corner fillets from circular arcs into elliptical
         // ones, so a wide rounded rectangle cannot be made by squashing a square
         // one -- the proportions have to exist before the corners are rounded.
-        // Both are a percentage of frame HEIGHT, so equal values are a true
-        // square on any timeline.
+        DefineBool(p_Desc, page, g, kParamShapeLink, "Lock Width to Height",
+                   "Makes the shape square: a true square, circle or regular polygon "
+                   "whatever the frame's aspect. Turn off to set Width independently, "
+                   "which reveals it.", true);
         {
             OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeWidth);
             p->setLabels("Width", "Width", "Width");
-            p->setHint("Half-width as a percentage of frame height. Set equal to Height "
-                       "for a square or a circle.");
+            p->setHint("Width as a percentage of the frame's WIDTH -- 100 spans the frame. "
+                       "Measured against its own axis, so the number means what it says "
+                       "without having to divide by the aspect.");
             p->setDefault(40.0);
-            p->setRange(1.0, 400.0);
-            p->setDisplayRange(5.0, 120.0);
+            p->setRange(0.1, 400.0);
+            p->setDisplayRange(5.0, 100.0);
             p->setAnimates(false);
             p->setParent(*g);
             AddParamUI(page, p);
@@ -2131,10 +2150,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         {
             OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeSize);
             p->setLabels("Height", "Height", "Height");
-            p->setHint("Half-height as a percentage of frame height.");
+            p->setHint("Height as a percentage of the frame's HEIGHT -- 100 spans the frame.");
             p->setDefault(40.0);
-            p->setRange(1.0, 400.0);
-            p->setDisplayRange(5.0, 120.0);
+            p->setRange(0.1, 400.0);
+            p->setDisplayRange(5.0, 100.0);
             p->setAnimates(false);
             p->setParent(*g);
             AddParamUI(page, p);

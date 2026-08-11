@@ -100,6 +100,7 @@ constexpr const char* kParamShapeSides  = "shapeSides";
 constexpr const char* kParamShapeCorner = "shapeCorner";
 constexpr const char* kParamShapeSize   = "shapeSize";    ///< height
 constexpr const char* kParamShapeWidth  = "shapeWidth";
+constexpr const char* kParamShapeLink   = "shapeLinkWH";
 constexpr const char* kParamShapeSlot   = "shapeTarget";
 constexpr const char* kParamShapeAdd    = "shapeAdd";
 

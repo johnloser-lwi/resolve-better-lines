@@ -1385,6 +1385,61 @@ int main(int argc, char** argv)
                 }
             }
 
+            // Authored units, end to end on a NON-square frame. Each axis is a
+            // percentage of its own axis of the frame, so 100 spans the frame on
+            // that axis -- the whole point being that the number in the panel
+            // needs no mental division by the aspect. A square frame agrees with
+            // the wrong convention too, so this has to be checked at 16:9.
+            {
+                const float asp = 16.0f / 9.0f;
+
+                auto span = [](const std::vector<ControlPoint>& p,
+                               float& x0, float& x1, float& y0, float& y1) {
+                    x0 = y0 = 1e9f; x1 = y1 = -1e9f;
+                    for (const ControlPoint& c : p)
+                    {
+                        x0 = std::min(x0, c.pos.x); x1 = std::max(x1, c.pos.x);
+                        y0 = std::min(y0, c.pos.y); y1 = std::max(y1, c.pos.y);
+                    }
+                };
+
+                float hx = 0.0f, hy = 0.0f, x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+                std::vector<ControlPoint> p;
+
+                // Width 100 must span the frame's WIDTH: slot x from 0 to 1.
+                ShapeExtents(100.0, 40.0, false, asp, hx, hy);
+                MakeShape(kShapeRectangle, 0, 0.0f, 0.5f, 0.5f, hx, hy, asp, p);
+                span(p, x0, x1, y0, y1);
+                if (std::fabs(x0) > 1e-4f || std::fabs(x1 - 1.0f) > 1e-4f)
+                {
+                    std::printf("  Width 100 spans %.4f..%.4f, want 0..1\n", x0, x1);
+                    ++bad;
+                }
+
+                // Height 100 must span the frame's HEIGHT, independently.
+                ShapeExtents(40.0, 100.0, false, asp, hx, hy);
+                MakeShape(kShapeRectangle, 0, 0.0f, 0.5f, 0.5f, hx, hy, asp, p);
+                span(p, x0, x1, y0, y1);
+                if (std::fabs(y0) > 1e-4f || std::fabs(y1 - 1.0f) > 1e-4f)
+                {
+                    std::printf("  Height 100 spans %.4f..%.4f, want 0..1\n", y0, y1);
+                    ++bad;
+                }
+
+                // Locked, the shape must be square IN PIXELS whatever Width says,
+                // which on 16:9 means its slot width is 1/aspect of its height.
+                ShapeExtents(93.0, 50.0, true, asp, hx, hy);   // width deliberately absurd
+                MakeShape(kShapeRectangle, 0, 0.0f, 0.5f, 0.5f, hx, hy, asp, p);
+                span(p, x0, x1, y0, y1);
+                const float wpx = (x1 - x0) * asp;
+                const float hpx = (y1 - y0);
+                if (hpx < 1e-6f || std::fabs(wpx / hpx - 1.0f) > 1e-3f)
+                {
+                    std::printf("  locked shape not square: %.4f x %.4f\n", wpx, hpx);
+                    ++bad;
+                }
+            }
+
             std::printf("shape generators: %s\n", bad == 0 ? "ok" : "FAILED");
             failures += bad;
         }

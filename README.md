@@ -565,7 +565,8 @@ placing and sizing a shape needs no per-shape controls at all.
 | **Shape** | Rectangle, Ellipse, Polygon |
 | **Sides** | Polygon only. 3 is a triangle. Range shrinks to 3..8 once Corner Radius leaves zero |
 | **Corner Radius** | % of the shape's *inscribed* radius; ignored by Ellipse |
-| **Width**, **Height** | Half-extents, both as a % of frame *height*, so equal values are a true square on any timeline |
+| **Lock Width to Height** | Makes the shape a true square/circle/regular polygon whatever the frame's aspect. On by default; hides Width |
+| **Width**, **Height** | Each a % of *its own* axis of the frame — 100 spans the frame on that axis |
 | **Into** | `Next Free` picks the first stroke that is switched off, so adding never overwrites work in progress |
 
 - **Corner Radius is measured against the inscribed radius**, the distance from the centre to
@@ -605,6 +606,19 @@ placing and sizing a shape needs no per-shape controls at all.
   wide rounded rectangle cannot be made by squashing a square one — the proportions have to
   exist *before* the corners are rounded. To reproportion one after the fact, use
   [multi-point selection](#multi-point-selection-and-why-it-exists).
+- **Each axis is a percentage of its own axis of the frame.** Width 100 spans the frame's
+  width; Height 100 spans its height. Measuring width against the *height* would be internally
+  tidier — height units are what the geometry is built in — but it makes the number in the
+  panel meaningless, because you have to divide by the frame's aspect in your head to predict
+  where the edge lands. Fusion measures each axis against its own for the same reason.
+  `ShapeExtents` does the conversion, and lives in `core/` precisely so the offline tests can
+  reach it: `--sheet check` asserts on a **16:9** frame that Width 100 spans 0..1 in x, that
+  Height 100 spans 0..1 in y, and that a locked shape is square *in pixels*. A square test
+  frame agrees with the wrong convention, so the assertion is worthless anywhere else.
+- **Lock Width to Height** (on by default) gives a true square, circle or regular polygon on
+  any frame. Locked, Width is simply **not read** and is hidden — the same rule as Transform's
+  linked Scale Y, and for the same reason: mirroring one control into the other means a visible
+  round trip that loses track whenever the host coalesces events.
 - **Existing keys on the target slot are deleted first.** They describe the shape that used to
   be there and would win at every frame, making the button look like it had done nothing.
 - Shape controls are `AddParamUI`, so they neither invalidate the render cache nor appear in

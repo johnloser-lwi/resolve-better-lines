@@ -163,6 +163,34 @@ inline void PolygonVerts(float rx, float ry, int sides, std::vector<Vec2>& out)
     }
 }
 
+/** @brief Authored Width%/Height% -> the square-unit half-extents MakeShape wants.
+ *
+ * Each axis is authored against its OWN axis of the frame: Width 100 spans the
+ * frame's width, Height 100 spans its height. Measuring width against the height
+ * instead would be internally tidier -- height units are what the geometry is
+ * built in -- but it makes the number in the panel meaningless, because the user
+ * has to divide by the frame's aspect to predict where the edge lands. Fusion
+ * measures each axis against its own for the same reason.
+ *
+ * The conversion is therefore: a fraction @c f of the frame WIDTH is @c f*aspect
+ * frame-heights. Height needs no conversion, being already in frame-heights.
+ *
+ * @param lockWH ignore @p widthPct and take the width from the height, giving a
+ *               true square/circle/regular polygon whatever the frame's aspect.
+ *               The width is simply NOT READ rather than mirrored into, which is
+ *               what keeps the two from desyncing.
+ *
+ * Percentages are of the FULL extent, so 100 spans the frame and the half-extent
+ * is a two-hundredth of it.
+ */
+inline void ShapeExtents(double widthPct, double heightPct, bool lockWH,
+                         float aspect, float& halfX, float& halfY)
+{
+    const float a = (aspect > 1e-6f) ? aspect : 1.0f;
+    halfY = static_cast<float>(heightPct) * 0.005f;
+    halfX = lockWH ? halfY : static_cast<float>(widthPct) * 0.005f * a;
+}
+
 /** @brief Build one shape into slot-space control points.
  *
  * @param kind    ShapeKind
