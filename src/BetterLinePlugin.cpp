@@ -228,20 +228,10 @@ private:
 
     OFX::Double2DParam* _xfPos    = nullptr;
     OFX::DoubleParam*   _xfRot    = nullptr;
-    OFX::Double2DParam* _xfScale  = nullptr;
+    OFX::DoubleParam*   _xfScale  = nullptr;
+    OFX::DoubleParam*   _xfScaleY = nullptr;
     OFX::Double2DParam* _xfAnchor = nullptr;
     OFX::BooleanParam*  _xfLink   = nullptr;
-
-    void syncLinkedScale(double time);
-
-    /// Last scale seen, so a change can be attributed to X or to Y.
-    ///
-    /// changedParam names the PARAMETER that changed, never which component of
-    /// it -- so with a single Double2D there is no other way to know which of
-    /// the two the user just dragged, and mirroring the wrong one would undo
-    /// the edit as fast as it was made.
-    double _lastScaleX = 1.0, _lastScaleY = 1.0;
-    bool   _syncingScale = false;
 
     OFX::RGBAParam*    _color      = nullptr;
     OFX::DoubleParam*  _opacity    = nullptr;
@@ -406,14 +396,10 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
 
     _xfPos    = fetchDouble2DParam(kParamXfPos);
     _xfRot    = fetchDoubleParam(kParamXfRot);
-    _xfScale  = fetchDouble2DParam(kParamXfScale);
+    _xfScale  = fetchDoubleParam(kParamXfScale);
+    _xfScaleY = fetchDoubleParam(kParamXfScaleY);
     _xfAnchor = fetchDouble2DParam(kParamXfAnchor);
     _xfLink   = fetchBooleanParam(kParamXfLink);
-
-    // Seeded from the actual value, not from the default: a project reopened
-    // with a non-uniform scale would otherwise look like X had just been edited
-    // and the link would flatten Y on the first unrelated change.
-    try { _xfScale->getValue(_lastScaleX, _lastScaleY); } catch (...) {}
 
     _color      = fetchRGBAParam(kParamColor);
     _opacity    = fetchDoubleParam(kParamOpacity);
@@ -799,53 +785,6 @@ void BetterLinePlugin::importSvg()
     bl::ProbeLog("svg import: " + o.str() + (r.sawArc ? "  [arcs converted]" : ""));
 }
 
-/** @brief Mirror whichever scale axis the user just changed onto the other.
- *
- * Written with the same keyframe rule the overlay uses: on an animated
- * parameter a plain setValue edits the static value underneath the animation,
- * which the curve then overrides -- so the mirrored axis would silently refuse
- * to follow on exactly the shapes someone bothered to animate.
- */
-void BetterLinePlugin::syncLinkedScale(double time)
-{
-    if (_syncingScale) return;
-
-    try
-    {
-        bool link = true;
-        _xfLink->getValueAtTime(time, link);
-
-        double x = 1.0, y = 1.0;
-        _xfScale->getValueAtTime(time, x, y);
-
-        if (!link) { _lastScaleX = x; _lastScaleY = y; return; }
-
-        const bool movedX = std::fabs(x - _lastScaleX) > 1e-9;
-        const bool movedY = std::fabs(y - _lastScaleY) > 1e-9;
-
-        double nx = x, ny = y;
-        if      (movedX && !movedY) ny = x;
-        else if (movedY && !movedX) nx = y;
-        else if (movedX && movedY)  { _lastScaleX = x; _lastScaleY = y; return; }
-        else                        return;   // nothing actually changed
-
-        if (std::fabs(nx - x) > 1e-12 || std::fabs(ny - y) > 1e-12)
-        {
-            _syncingScale = true;
-            {
-                bl::EditBlock block(this, "Link Scale");
-                if (_xfScale->getNumKeys() > 0) _xfScale->setValueAtTime(time, nx, ny);
-                else                            _xfScale->setValue(nx, ny);
-            }
-            _syncingScale = false;
-        }
-
-        _lastScaleX = nx;
-        _lastScaleY = ny;
-    }
-    catch (...) { _syncingScale = false; }
-}
-
 void BetterLinePlugin::syncPresetFolderLabel()
 {
     // Shown resolved rather than as "(default)": the point of the read-out is to
@@ -866,6 +805,15 @@ void BetterLinePlugin::syncVisibility()
     bl::ProbeScope _t("syncVisibility");
     try
     {
+        // Hidden while linked, because it is not read while linked. Leaving it
+        // on screen would show a number that has no effect, which is exactly the
+        // confusion the mirroring was meant to avoid and caused instead.
+        {
+            bool link = true;
+            _xfLink->getValue(link);
+            _xfScaleY->setIsSecret(link);
+        }
+
         int strokes = 1;
         _strokeCount->getValue(strokes);
         strokes = strokes < 1 ? 1 : (strokes > kMaxStrokes ? kMaxStrokes : strokes);
@@ -914,7 +862,7 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
                                     const std::string& p_ParamName)
 {
     bl::ProbeScope _t("changedParam");
-    if (_syncingEase || _syncingScale) return;
+    if (_syncingEase) return;
 
     // While a preset is being written, every setValue dispatches back here.
     // Reacting to each would run syncVisibility hundreds of times for one Load,
@@ -949,36 +897,9 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
         return;
     }
 
-    if (p_ParamName == kParamXfScale) { syncLinkedScale(p_Args.time); return; }
-    if (p_ParamName == kParamXfLink)
-    {
-        // Turning the link ON snaps Y to X, so "linked" is true immediately
-        // rather than only from the next edit onwards -- a toggle that says the
-        // axes are linked while they hold different values is just wrong.
-        try
-        {
-            bool link = false;
-            _xfLink->getValueAtTime(p_Args.time, link);
-            if (link)
-            {
-                double x = 1.0, y = 1.0;
-                _xfScale->getValueAtTime(p_Args.time, x, y);
-                if (std::fabs(x - y) > 1e-9)
-                {
-                    _syncingScale = true;
-                    {
-                        bl::EditBlock block(this, "Link Scale");
-                        if (_xfScale->getNumKeys() > 0) _xfScale->setValueAtTime(p_Args.time, x, x);
-                        else                            _xfScale->setValue(x, x);
-                    }
-                    _syncingScale = false;
-                }
-                _lastScaleX = _lastScaleY = x;
-            }
-        }
-        catch (...) { _syncingScale = false; }
-        return;
-    }
+    // Nothing to write: the link only decides whether Scale Y is READ. All this
+    // does is show or hide the field.
+    if (p_ParamName == kParamXfLink) { syncVisibility(); return; }
 
     if (p_ParamName == kParamStrokeCount) { syncVisibility(); return; }
 
@@ -1225,10 +1146,14 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
     // differently at every timeline resolution.
     Xform2D xf;
     {
-        double ax = 0.5, ay = 0.5, ox = 0.0, oy = 0.0, sx = 1.0, sy = 1.0;
+        double ax = 0.5, ay = 0.5, ox = 0.0, oy = 0.0;
         _xfAnchor->getValueAtTime(t, ax, ay);
         _xfPos->getValueAtTime(t, ox, oy);
-        _xfScale->getValueAtTime(t, sx, sy);
+
+        // Linked simply means Scale Y is not read. Nothing is written anywhere,
+        // so the two can never drift out of step.
+        const double sx = DoubleAt(_xfScale, t);
+        const double sy = BoolAt(_xfLink, t) ? sx : DoubleAt(_xfScaleY, t);
 
         xf = MakeXform(Vec2(static_cast<float>(rod.x1 + ax * w),
                             static_cast<float>(rod.y1 + ay * h)),
@@ -1947,11 +1872,21 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         DefineDouble(p_Desc, page, g, kParamXfRot, "Rotation",
                      "Degrees, about the Anchor.", 0.0, -100000.0, 100000.0, -180.0, 180.0);
 
-        xy(kParamXfScale, "Scale", "About the Anchor.", 1.0, 1.0, 0.0, 3.0);
+        // Two separate scalars rather than one Double2D with the axes mirrored.
+        //
+        // Mirroring meant writing the other axis back through the host on every
+        // change: a round trip you can watch happen, and one that loses track if
+        // the host coalesces events -- leaving the two stuck out of step. There
+        // is nothing to write here. When linked, Scale Y is simply not read, and
+        // it is hidden so the panel cannot show a number that is not in force.
+        DefineDouble(p_Desc, page, g, kParamXfScale, "Scale",
+                     "About the Anchor.", 1.0, -1000.0, 1000.0, 0.0, 3.0);
+        DefineDouble(p_Desc, page, g, kParamXfScaleY, "Scale Y",
+                     "Only used when Link Scale is off.", 1.0, -1000.0, 1000.0, 0.0, 3.0);
 
         DefineBool(p_Desc, page, g, kParamXfLink, "Link Scale",
-                   "Keeps X and Y together, so one edit scales proportionally. Turn "
-                   "off to stretch on one axis.", true);
+                   "Scales proportionally from the one Scale value. Turn off to stretch "
+                   "one axis, which reveals Scale Y.", true);
 
         xy(kParamXfAnchor, "Anchor",
            "The point rotation and scale pivot around, as a fraction of the frame. "

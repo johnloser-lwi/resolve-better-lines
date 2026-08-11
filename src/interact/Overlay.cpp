@@ -128,7 +128,9 @@ private:
     // --- easing curve editor -------------------------------------------------
     OFX::Double2DParam* _xfPos    = nullptr;
     OFX::DoubleParam*   _xfRot    = nullptr;
-    OFX::Double2DParam* _xfScale  = nullptr;
+    OFX::DoubleParam*   _xfScale  = nullptr;
+    OFX::DoubleParam*   _xfScaleY = nullptr;
+    OFX::BooleanParam*  _xfLink   = nullptr;
     OFX::Double2DParam* _xfAnchor = nullptr;
 
     // --- imported geometry ---------------------------------------------------
@@ -222,7 +224,9 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
         }
         _xfPos    = _effect->fetchDouble2DParam(kParamXfPos);
         _xfRot    = _effect->fetchDoubleParam(kParamXfRot);
-        _xfScale  = _effect->fetchDouble2DParam(kParamXfScale);
+        _xfScale  = _effect->fetchDoubleParam(kParamXfScale);
+        _xfScaleY = _effect->fetchDoubleParam(kParamXfScaleY);
+        _xfLink   = _effect->fetchBooleanParam(kParamXfLink);
         _xfAnchor = _effect->fetchDouble2DParam(kParamXfAnchor);
 
         _importShow = _effect->fetchBooleanParam(kParamImportShow);
@@ -384,10 +388,14 @@ bool BetterLineInteract::buildContext(double time, const OfxPointD& pixelScale,
         // Same transform the renderer builds, in canonical rather than pixel
         // units -- which are the same shape, so rotation behaves identically.
         double ax = 0.5, ay = 0.5, ox = 0.0, oy = 0.0, sx = 1.0, sy = 1.0, rot = 0.0;
+        bool link = true;
         if (_xfAnchor) _xfAnchor->getValueAtTime(time, ax, ay);
         if (_xfPos)    _xfPos->getValueAtTime(time, ox, oy);
-        if (_xfScale)  _xfScale->getValueAtTime(time, sx, sy);
         if (_xfRot)    _xfRot->getValueAtTime(time, rot);
+        if (_xfLink)   _xfLink->getValueAtTime(time, link);
+        if (_xfScale)  _xfScale->getValueAtTime(time, sx);
+        sy = sx;
+        if (!link && _xfScaleY) _xfScaleY->getValueAtTime(time, sy);
 
         out.xform = MakeXform(Vec2(static_cast<float>(out.rod.x1 + ax * w),
                                    static_cast<float>(out.rod.y1 + ay * h)),
@@ -1027,7 +1035,8 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
                 {
                     _xfPos->getValueAtTime(c.time, _xfOrigX, _xfOrigY);
                     _xfRot->getValueAtTime(c.time, _xfOrigRot);
-                    _xfScale->getValueAtTime(c.time, _xfOrigSx, _xfOrigSy);
+                    _xfScale->getValueAtTime(c.time, _xfOrigSx);
+                    _xfScaleY->getValueAtTime(c.time, _xfOrigSy);
                 }
                 catch (...) { return false; }
 
@@ -1227,7 +1236,12 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
                 {
                     const double d = std::sqrt(dx * dx + dy * dy);
                     const double k = d / _xfPressDist;
-                    _xfScale->setValue(_xfOrigSx * k, _xfOrigSy * k);
+
+                    // Both axes scale by the same ratio whether linked or not:
+                    // the gizmo is a uniform handle, and an unlinked shape keeps
+                    // the stretch it was given rather than losing it to a drag.
+                    _xfScale->setValue(_xfOrigSx * k);
+                    _xfScaleY->setValue(_xfOrigSy * k);
                 }
             }
             requestRedraw();

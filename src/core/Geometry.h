@@ -8,6 +8,7 @@
 // curve.
 
 #include "Common.h"
+#include "Style.h"   // StrokePaint
 
 #include <vector>
 
@@ -32,6 +33,10 @@ struct Stroke
 {
     std::vector<ControlPoint> pts;
     bool closed = false;
+
+    /// Only meaningful for imported geometry; hand-drawn strokes take their look
+    /// from the style parameters instead.
+    StrokePaint paint;
 };
 
 /** @brief A flattened path with its cumulative arc length.

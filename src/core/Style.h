@@ -26,6 +26,27 @@ BL_HD inline Color LerpColor(const Color& x, const Color& y, float t)
                  Lerp(x.b, y.b, t), Lerp(x.a, y.a, t));
 }
 
+/** @brief Paint a single subpath carries with it, as authored.
+ *
+ * Imported artwork tells us what it wants: this path is a black fill, that one
+ * is a 40-wide stroke. Discarding it and applying one global style is what
+ * turns a three-tone logo into a silhouette.
+ *
+ * Carried per SUBPATH rather than per parameter slot, because an import can be
+ * twenty subpaths and parameters cannot.
+ */
+struct StrokePaint
+{
+    bool  hasStroke   = false;
+    bool  hasFill     = false;
+    Color strokeColor = Color(1.0f, 1.0f, 1.0f, 1.0f);
+    Color fillColor   = Color(1.0f, 1.0f, 1.0f, 1.0f);
+
+    /// Stroke width in the same normalised units as the points, so it survives
+    /// a change of resolution exactly as the geometry does.
+    float width = 0.0f;
+};
+
 enum CapStyle { kCapRound = 0, kCapButt = 1, kCapSquare = 2 };
 
 enum GradMode
