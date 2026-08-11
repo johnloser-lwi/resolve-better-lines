@@ -505,8 +505,21 @@ A line is its own element rather than a treatment of someone else's picture, so 
 is the honest description of it. **Resolve supports it** — measured, not assumed: `probe.log`
 records `createInstance: generator`, which is the fact that settles it (a host describes every
 context it knows about, so `describeInContext` alone would only mean Resolve parsed the
-declaration). It appears as **Better Line Generator**, labelled per context so the two entries
-are told apart.
+declaration).
+
+It ships as **two plugins**, `Better Line` and `Better Line Generator`, with separate plugin
+identifiers. The first attempt was one plugin declaring all three contexts, which is the
+tidier-looking design and is wrong here: **Resolve ignores per-context labels**, so both
+entries came out called "Better Line", side by side in the same list, with nothing to tell
+them apart.
+
+They also cannot be two *instances* of one factory class. `PluginFactoryHelper` derives from
+`FactoryMainEntryHelper<FACTORY>`, which holds a **static `_uid` per template instantiation**
+and asserts its constructor runs only once — two instances of one class would share a uid and
+route both plugins through a single main entry. The generator therefore gets its own class,
+and the two share their bodies through `DescribeShared` / `DescribeInContextShared`. Both
+create the same `BetterLinePlugin`: the difference is entirely in what is *declared*, not in
+what runs.
 
 Two defaults have to be overridden, and both fail in ways that look nothing like their cause.
 Neither is reachable in the Filter context, where the input is always connected — which is why

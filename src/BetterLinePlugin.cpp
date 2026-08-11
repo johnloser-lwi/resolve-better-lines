@@ -1793,21 +1793,49 @@ BetterLinePluginFactory::BetterLinePluginFactory()
 {
 }
 
-void BetterLinePluginFactory::describe(OFX::ImageEffectDescriptor& p_Desc)
+BetterLineGeneratorFactory::BetterLineGeneratorFactory()
+    : OFX::PluginFactoryHelper<BetterLineGeneratorFactory>(kPluginIdentifierGenerator,
+                                                           kPluginVersionMajor,
+                                                           kPluginVersionMinor)
 {
-    p_Desc.setLabels(kPluginName, kPluginName, kPluginName);
+}
+
+/** @brief describe(), shared by both factories.
+ *
+ * Two SEPARATE plugins rather than one plugin declaring three contexts, which is
+ * what the first attempt did. Resolve ignores per-context labels: both entries
+ * came out called "Better Line", in the same list, with nothing to tell them
+ * apart. A name is not decoration when the host offers a choice between two of
+ * them.
+ *
+ * They cannot be two instances of ONE factory class either. PluginFactoryHelper
+ * derives from FactoryMainEntryHelper<FACTORY>, which keeps a STATIC _uid per
+ * template instantiation and asserts its constructor runs only once -- two
+ * instances of the same class would share one uid and route both plugins through
+ * a single main entry. So the generator gets its own class, and the two share
+ * their bodies through these helpers instead.
+ */
+void DescribeShared(OFX::ImageEffectDescriptor& p_Desc, bool p_Generator)
+{
+    const char* name = p_Generator ? kPluginNameGenerator : kPluginName;
+    p_Desc.setLabels(name, name, name);
     p_Desc.setPluginGrouping(kPluginGrouping);
     p_Desc.setPluginDescription(kPluginDescription);
 
-    p_Desc.addSupportedContext(OFX::eContextFilter);
-    p_Desc.addSupportedContext(OFX::eContextGeneral);
     // A line is its own element rather than a treatment of someone else's
-    // picture, so the generator context is the honest description of it. Whether
-    // Resolve surfaces it is the host's business -- OFX has no property that
-    // enumerates the contexts a host will instantiate, so declaring it and
-    // looking is the only way to find out. Declaring one the host ignores costs
-    // nothing.
-    p_Desc.addSupportedContext(OFX::eContextGenerator);
+    // picture, so the generator context is the honest description of it -- and
+    // Resolve does instantiate it. Split into its own plugin so the effect entry
+    // stays a filter and the generator entry stays a generator, rather than one
+    // ambiguous entry that is whichever the host felt like.
+    if (p_Generator)
+    {
+        p_Desc.addSupportedContext(OFX::eContextGenerator);
+    }
+    else
+    {
+        p_Desc.addSupportedContext(OFX::eContextFilter);
+        p_Desc.addSupportedContext(OFX::eContextGeneral);
+    }
     p_Desc.addSupportedBitDepth(OFX::eBitDepthFloat);
 
     p_Desc.setSingleInstance(false);
@@ -1839,6 +1867,16 @@ void BetterLinePluginFactory::describe(OFX::ImageEffectDescriptor& p_Desc)
         p_Desc.setSupportsCudaStream(true);
     }
 #endif
+}
+
+void BetterLinePluginFactory::describe(OFX::ImageEffectDescriptor& p_Desc)
+{
+    DescribeShared(p_Desc, false);
+}
+
+void BetterLineGeneratorFactory::describe(OFX::ImageEffectDescriptor& p_Desc)
+{
+    DescribeShared(p_Desc, true);
 }
 
 namespace {
@@ -1980,8 +2018,8 @@ const char* ContextName(OFX::ContextEnum c)
 
 } // namespace
 
-void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
-                                                OFX::ContextEnum p_Context)
+void DescribeInContextShared(OFX::ImageEffectDescriptor& p_Desc,
+                             OFX::ContextEnum p_Context)
 {
     // Two separate facts, and only both together answer the question. The host
     // describes every context it knows about, but describing one is not a promise
@@ -2856,6 +2894,18 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
     }
 }
 
+void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
+                                                OFX::ContextEnum p_Context)
+{
+    DescribeInContextShared(p_Desc, p_Context);
+}
+
+void BetterLineGeneratorFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
+                                                   OFX::ContextEnum p_Context)
+{
+    DescribeInContextShared(p_Desc, p_Context);
+}
+
 OFX::ImageEffect* BetterLinePluginFactory::createInstance(OfxImageEffectHandle p_Handle,
                                                           OFX::ContextEnum p_Context)
 {
@@ -2864,8 +2914,22 @@ OFX::ImageEffect* BetterLinePluginFactory::createInstance(OfxImageEffectHandle p
     return new BetterLinePlugin(p_Handle);
 }
 
+OFX::ImageEffect* BetterLineGeneratorFactory::createInstance(OfxImageEffectHandle p_Handle,
+                                                             OFX::ContextEnum p_Context)
+{
+    bl::ProbeOnce(std::string("instance-gen-") + ContextName(p_Context),
+                  std::string("createInstance (generator plugin): ") + ContextName(p_Context));
+    return new BetterLinePlugin(p_Handle);
+}
+
 void OFX::Plugin::getPluginIDs(OFX::PluginFactoryArray& p_FactoryArray)
 {
-    static BetterLinePluginFactory betterLinePlugin;
+    // Two plugin IDs, deliberately. One entry declaring both roles came out as
+    // two identically named "Better Line" rows in Resolve's list, because the
+    // host ignores per-context labels -- leaving the user to guess which was
+    // which.
+    static BetterLinePluginFactory    betterLinePlugin;
+    static BetterLineGeneratorFactory betterLineGenerator;
     p_FactoryArray.push_back(&betterLinePlugin);
+    p_FactoryArray.push_back(&betterLineGenerator);
 }
