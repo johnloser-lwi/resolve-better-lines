@@ -151,6 +151,7 @@ constexpr const char* kParamGradColor = "gradColor";
 constexpr const char* kParamGradStart = "gradStart";
 constexpr const char* kParamGradEnd   = "gradEnd";
 constexpr const char* kParamGradMid   = "gradMidpoint";
+constexpr const char* kParamGradLoop  = "gradSeamless";
 
 constexpr const char* kParamDash      = "dash";
 constexpr const char* kParamDashLen   = "dashLength";

@@ -80,6 +80,18 @@ std::vector<Case> MakeCases()
         c.style.gradMode = kGradAlong; c.style.gradColor = Color(1.0f, 0.2f, 0.1f, 1.0f);
         v.push_back(c);
     }
+    {   // The seamless fold. A separate branch in the shared kernel, so it needs
+        // its own parity case -- the default is off and every other gradient case
+        // would agree while this one diverged.
+        Case c; c.name = "closed gradient, seamless";
+        c.stroke.pts = { CP(60, 128, 0, 55), CP(128, 196, 55, 0),
+                         CP(196, 128, 0, -55), CP(128, 60, -55, 0) };
+        c.stroke.closed = true;
+        c.style.halfWidth = 12.0f; c.style.feather = 1.2f;
+        c.style.gradMode = kGradAlong; c.style.gradLoop = true;
+        c.style.gradColor = Color(0.1f, 0.4f, 1.0f, 1.0f);
+        v.push_back(c);
+    }
     {
         Case c; c.name = "zero feather, hard edge";
         c.stroke.pts = { CP(40, 200, 90, -80), CP(210, 50, 40, 60) };

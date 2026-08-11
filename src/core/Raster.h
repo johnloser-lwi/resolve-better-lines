@@ -373,7 +373,14 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         // same signed value is what makes the difference between the two a
         // choice rather than a limitation.
         float raw = 0.0f;
-        if      (st.gradMode == kGradAlong)  raw = Saturate(s);
+        if (st.gradMode == kGradAlong)
+        {
+            raw = Saturate(s);
+            // Out and back, so a closed contour's two ends meet in the same
+            // colour instead of butting the ramp's start against its end.
+            if (st.gradLoop) raw = 1.0f - ((raw < 0.5f) ? (1.0f - 2.0f * raw)
+                                                        : (2.0f * raw - 1.0f));
+        }
         else if (st.gradMode == kGradAcross) raw = (u + 1.0f) * 0.5f;
         else                                 raw = (u < 0.0f) ? -u : u;
 

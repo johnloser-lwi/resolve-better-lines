@@ -1,6 +1,6 @@
 #pragma once
 
-// Generators for the common primitives: rectangle, ellipse, triangle, polygon.
+// Generators for the common primitives: rectangle, ellipse, regular polygon.
 //
 // These exist because the plugin already has a global Transform, which makes
 // point-by-point placement the wrong unit of work for a shape someone wants as a
@@ -8,11 +8,22 @@
 // two actions; drawing a circle out of four bezier points by hand is not
 // something anyone should be asked to do twice.
 //
+// There is no separate triangle: a triangle is a three-sided polygon, and having
+// both would be two controls for one idea.
+//
 // Output is in SLOT coordinates -- x a fraction of frame WIDTH, y a fraction of
 // frame HEIGHT, origin bottom-left -- because that is what the keyframable point
-// slots store. Those units are NOT square on a non-square frame, so every
-// generator takes an @c aspect and pre-divides x by it. Without that a "circle"
-// on a 16:9 timeline is an ellipse almost twice as wide as it is tall.
+// slots store.
+//
+// Those units are NOT square on a non-square frame, which is the trap this file
+// is arranged around. Every generator below works in SQUARE units centred on the
+// origin, and MakeShape divides x by the aspect exactly once, at the very end,
+// for positions and tangents alike. Doing it any earlier means a scalar handle
+// length gets applied to two axes of different scale: the corner arcs come out
+// with a horizontal handle an aspect-ratio too long, so a rounded rectangle has
+// one flank of every corner stretched. Squashing at the end is also exactly
+// right geometrically -- square units map to pixels by a single factor (the
+// frame height), so a circular fillet stays circular.
 //
 // Handles are SYMMETRIC, which is a constraint rather than a preference: a slot
 // point stores one tangent, and the incoming handle is its mirror. It happens to
@@ -31,8 +42,7 @@ enum ShapeKind
 {
     kShapeRectangle = 0,
     kShapeEllipse   = 1,
-    kShapeTriangle  = 2,
-    kShapePolygon   = 3,
+    kShapePolygon   = 2,
 };
 
 /** @brief Handle length for a circular arc of @p sweep radians at radius @p r.
@@ -55,9 +65,7 @@ inline int ShapePointCount(int kind, int sides, bool rounded)
 {
     if (kind == kShapeEllipse) return 4;
 
-    const int n = (kind == kShapeRectangle) ? 4
-                : (kind == kShapeTriangle)  ? 3
-                : (sides < 3 ? 3 : sides);
+    const int n = (kind == kShapeRectangle) ? 4 : (sides < 3 ? 3 : sides);
     return rounded ? n * 2 : n;
 }
 
@@ -68,24 +76,18 @@ inline int MaxSidesFor(int maxPoints, bool rounded)
     return n < 3 ? 3 : n;
 }
 
-/** @brief Four-point bezier ellipse, centred on @p cx,@p cy.
- *
- * @param rx,ry radii in frame-height units for both axes; x is divided by
- *              @p aspect on the way out so the result is round on screen.
- */
-inline void MakeEllipse(float cx, float cy, float rx, float ry, float aspect,
-                        std::vector<ControlPoint>& out)
+/** @brief Four-point bezier ellipse about the origin, in square units. */
+inline void MakeEllipse(float rx, float ry, std::vector<ControlPoint>& out)
 {
-    const float ax = rx / (aspect > 1e-6f ? aspect : 1.0f);
-    const float hx = ArcHandle(ax, 1.5707963268f);
+    const float hx = ArcHandle(rx, 1.5707963268f);
     const float hy = ArcHandle(ry, 1.5707963268f);
 
-    // Counter-clockwise from the right, matching the polygon generators so a
+    // Counter-clockwise from the right, matching the polygon generator so a
     // fill's winding does not depend on which shape produced it.
-    out.push_back({Vec2(cx + ax, cy), Vec2(0.0f,  hy), Vec2(), false});
-    out.push_back({Vec2(cx, cy + ry), Vec2(-hx, 0.0f), Vec2(), false});
-    out.push_back({Vec2(cx - ax, cy), Vec2(0.0f, -hy), Vec2(), false});
-    out.push_back({Vec2(cx, cy - ry), Vec2( hx, 0.0f), Vec2(), false});
+    out.push_back({Vec2( rx, 0.0f), Vec2(0.0f,  hy), Vec2(), false});
+    out.push_back({Vec2(0.0f,  ry), Vec2(-hx, 0.0f), Vec2(), false});
+    out.push_back({Vec2(-rx, 0.0f), Vec2(0.0f, -hy), Vec2(), false});
+    out.push_back({Vec2(0.0f, -ry), Vec2( hx, 0.0f), Vec2(), false});
 }
 
 /** @brief Round the corners of a closed polygon given by its vertices.
@@ -114,9 +116,10 @@ inline void RoundCorners(const std::vector<Vec2>& verts, float radius,
         const float lb = Length(next - v);
 
         // Interior angle at this corner, from the two edge directions.
-        const float cosT = Clamp(Dot(ua, ub), -1.0f, 1.0f);
+        const float cosT  = Clamp(Dot(ua, ub), -1.0f, 1.0f);
         const float theta = ::acosf(cosT);
-        if (theta < 1e-4f || theta > 3.14149f) { out.push_back({v, Vec2(), Vec2(), false}); continue; }
+        if (theta < 1e-4f || theta > 3.14149f)
+        { out.push_back({v, Vec2(), Vec2(), false}); continue; }
 
         // Tangent distance for a fillet of this radius, then clamped to half of
         // the shorter edge so neighbouring corners cannot overlap.
@@ -135,41 +138,40 @@ inline void RoundCorners(const std::vector<Vec2>& verts, float radius,
 
         // Each fillet point's tangent points AT the corner, so its mirrored
         // incoming handle points back along its own straight edge and leaves that
-        // edge dead straight.
-        out.push_back({p1, Normalize(v - p1) * hl, Vec2(), false});
-        out.push_back({p2, Normalize(p2 - v) * hl, Vec2(), false});
+        // edge dead straight. Both handles are the same length, which is what
+        // makes the arc symmetric -- and why this has to happen in square units.
+        out.push_back({p1, ua * -hl, Vec2(), false});
+        out.push_back({p2, ub *  hl, Vec2(), false});
     }
 }
 
-/** @brief Regular n-gon vertices, counter-clockwise, flat side at the bottom.
+/** @brief Regular n-gon vertices about the origin, counter-clockwise.
  *
  * Rotated so an even-sided polygon rests on an edge and an odd-sided one points
  * up, which is what "hexagon" and "triangle" mean to anyone placing one.
  */
-inline void PolygonVerts(float cx, float cy, float rx, float ry, float aspect,
-                         int sides, std::vector<Vec2>& out)
+inline void PolygonVerts(float rx, float ry, int sides, std::vector<Vec2>& out)
 {
     if (sides < 3) sides = 3;
-    const float ax   = rx / (aspect > 1e-6f ? aspect : 1.0f);
     const float step = 6.2831853072f / static_cast<float>(sides);
     const float base = 1.5707963268f + ((sides % 2 == 0) ? step * 0.5f : 0.0f);
 
     for (int i = 0; i < sides; ++i)
     {
         const float a = base + step * static_cast<float>(i);
-        out.push_back(Vec2(cx + ax * ::cosf(a), cy + ry * ::sinf(a)));
+        out.push_back(Vec2(rx * ::cosf(a), ry * ::sinf(a)));
     }
 }
 
 /** @brief Build one shape into slot-space control points.
  *
  * @param kind    ShapeKind
- * @param sides   polygon side count; ignored by the other kinds
- * @param corner  corner radius as a FRACTION of the half-size, 0..1. Expressed
- *                relatively so it survives a later resize: an absolute radius on
- *                a shape the user then scales down would swallow the shape.
+ * @param sides   polygon side count (3 is a triangle); ignored by the others
+ * @param corner  corner radius as a FRACTION of the inscribed radius, 0..1.
+ *                Relative so it survives a later resize: an absolute radius on a
+ *                shape the user then scales down would swallow the shape.
+ * @param sizeX   half-width in frame-height units
  * @param sizeY   half-height in frame-height units
- * @param sizeX   half-width in frame-height units (equal to sizeY for a square)
  * @param aspect  frame width / height
  */
 inline void MakeShape(int kind, int sides, float corner,
@@ -180,52 +182,56 @@ inline void MakeShape(int kind, int sides, float corner,
 
     if (kind == kShapeEllipse)
     {
-        MakeEllipse(cx, cy, sizeX, sizeY, aspect, out);
-        return;
-    }
-
-    std::vector<Vec2> verts;
-    if (kind == kShapeRectangle)
-    {
-        const float ax = sizeX / (aspect > 1e-6f ? aspect : 1.0f);
-        verts.push_back(Vec2(cx + ax, cy - sizeY));
-        verts.push_back(Vec2(cx + ax, cy + sizeY));
-        verts.push_back(Vec2(cx - ax, cy + sizeY));
-        verts.push_back(Vec2(cx - ax, cy - sizeY));
+        MakeEllipse(sizeX, sizeY, out);
     }
     else
     {
-        PolygonVerts(cx, cy, sizeX, sizeY, aspect,
-                     (kind == kShapeTriangle) ? 3 : sides, verts);
+        std::vector<Vec2> verts;
+        if (kind == kShapeRectangle)
+        {
+            verts.push_back(Vec2( sizeX, -sizeY));
+            verts.push_back(Vec2( sizeX,  sizeY));
+            verts.push_back(Vec2(-sizeX,  sizeY));
+            verts.push_back(Vec2(-sizeX, -sizeY));
+        }
+        else
+        {
+            PolygonVerts(sizeX, sizeY, sides, verts);
+        }
+
+        if (corner <= 1e-4f)
+        {
+            for (const Vec2& v : verts) out.push_back({v, Vec2(), Vec2(), false});
+        }
+        else
+        {
+            // The radius is measured against the INSCRIBED radius -- centre to
+            // the middle of an edge -- so that 100% means "as round as this shape
+            // gets" for every shape alike.
+            //
+            // The obvious basis, the distance to a VERTEX, is not comparable
+            // across shapes: a triangle's corners sit twice as far out as its
+            // edges, so the percentage that gently softened a rectangle turned a
+            // triangle into a blob. Measured this way a triangle and a square
+            // agree, and a square at 100% is exactly a circle.
+            float basis = Min(sizeX, sizeY);
+            if (kind != kShapeRectangle)
+            {
+                const int n = (sides < 3) ? 3 : sides;
+                basis *= ::cosf(3.1415926536f / static_cast<float>(n));
+            }
+            RoundCorners(verts, Clamp(corner, 0.0f, 1.0f) * basis, out);
+        }
     }
 
-    if (corner <= 1e-4f)
+    // The one and only aspect correction, applied to positions and tangents
+    // alike. See the file header for why it cannot happen any earlier.
+    const float a = (aspect > 1e-6f) ? aspect : 1.0f;
+    for (ControlPoint& p : out)
     {
-        for (const Vec2& v : verts) out.push_back({v, Vec2(), Vec2(), false});
-        return;
+        p.pos = Vec2(cx + p.pos.x / a, cy + p.pos.y);
+        p.tan = Vec2(p.tan.x / a, p.tan.y);
     }
-
-    // The radius is measured against the INSCRIBED radius -- the distance from
-    // the centre to the middle of an edge -- so that 100% means "as round as this
-    // shape gets" for every shape alike.
-    //
-    // The obvious basis, the distance to a VERTEX, is not comparable across
-    // shapes: a triangle's vertices are twice as far out as its edges, so the
-    // same percentage that gently softened a rectangle turned a triangle into a
-    // blob. Measured against the inscribed radius a triangle and a square agree,
-    // and a rectangle at 100% is exactly a stadium.
-    //
-    // For the rectangle that inscribed radius is just half the shorter side; for
-    // a regular polygon it is the apothem, R*cos(pi/n).
-    const float axHalf = sizeX / (aspect > 1e-6f ? aspect : 1.0f);
-    float basis = Min(axHalf, sizeY);
-    if (kind != kShapeRectangle)
-    {
-        const int n = (kind == kShapeTriangle) ? 3 : (sides < 3 ? 3 : sides);
-        basis *= ::cosf(3.1415926536f / static_cast<float>(n));
-    }
-
-    RoundCorners(verts, Clamp(corner, 0.0f, 1.0f) * basis, out);
 }
 
 } // namespace bl

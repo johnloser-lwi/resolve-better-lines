@@ -856,8 +856,8 @@ std::vector<Case> MakeShapeCases()
     cases.push_back(shape("rect r100",       kShapeRectangle, 0, 100.0f, false));
     cases.push_back(shape("ellipse",         kShapeEllipse,   0, 0.0f,   false));
 
-    cases.push_back(shape("triangle",        kShapeTriangle,  0, 0.0f,   false));
-    cases.push_back(shape("triangle r30",    kShapeTriangle,  0, 30.0f,  false));
+    cases.push_back(shape("triangle",        kShapePolygon,   3, 0.0f,   false));
+    cases.push_back(shape("triangle r30",    kShapePolygon,   3, 30.0f,  false));
     cases.push_back(shape("pentagon",        kShapePolygon,   5, 0.0f,   false));
     cases.push_back(shape("hexagon r30",     kShapePolygon,   6, 30.0f,  false));
 
@@ -924,6 +924,29 @@ std::vector<Case> MakeGradCases()
     {   // Along-length band, for a highlight travelling down the line.
         Case c = base("along, band .3-.5", kGradAlong);
         c.style.gradStart = 0.3f; c.style.gradEnd = 0.5f;
+        cases.push_back(c);
+    }
+    {   // The seam, and its fix. On a CLOSED contour arc length runs 0..1 back to
+        // where it started, so an unfolded Along ramp butts its two ends together
+        // at the start point -- a hard colour join across a contour that has no
+        // edge there. These two cells are the same shape with gradLoop off and on.
+        Case c;
+        c.name = "closed along (seam)";
+        c.stroke.closed = true;
+        {
+            std::vector<ControlPoint> p;
+            MakeShape(kShapeEllipse, 0, 0.0f, 0.5f, 0.5f, 0.36f, 0.36f, 1.0f, p);
+            for (ControlPoint& q : p) { q.pos = q.pos * 256.0f; q.tan = q.tan * 256.0f; }
+            c.stroke.pts = p;
+        }
+        c.style.halfWidth = 14.0f; c.style.feather = 1.2f;
+        c.style.color     = Color(1.0f, 0.25f, 0.2f, 1.0f);
+        c.style.gradColor = Color(0.15f, 0.45f, 1.0f, 1.0f);
+        c.style.gradMode  = kGradAlong;
+        cases.push_back(c);
+
+        c.name = "closed along (seamless)";
+        c.style.gradLoop = true;
         cases.push_back(c);
     }
     {   // Across-width on a TAPERED stroke: u is normalised by the local
@@ -1229,7 +1252,7 @@ int main(int argc, char** argv)
             const struct { int kind; int sides; float corner; } kCases[] = {
                 {kShapeRectangle, 0, 0.0f}, {kShapeRectangle, 0, 0.4f},
                 {kShapeEllipse,   0, 0.0f}, {kShapeEllipse,   0, 0.4f},
-                {kShapeTriangle,  0, 0.0f}, {kShapeTriangle,  0, 0.4f},
+                {kShapePolygon,   3, 0.0f}, {kShapePolygon,   3, 0.4f},
                 {kShapePolygon,   5, 0.0f}, {kShapePolygon,   5, 0.4f},
                 {kShapePolygon,   8, 0.0f}, {kShapePolygon,   8, 0.3f},
             };
@@ -1255,7 +1278,7 @@ int main(int argc, char** argv)
             // numeric check rather than a visual one.
             {
                 std::vector<ControlPoint> p;
-                MakeShape(kShapeTriangle, 3, 0.0f, 0.5f, 0.5f, 0.34f, 0.34f, 1.0f, p);
+                MakeShape(kShapePolygon, 3, 0.0f, 0.5f, 0.5f, 0.34f, 0.34f, 1.0f, p);
                 int above = 0;
                 for (const ControlPoint& c : p) if (c.pos.y > 0.5f + 1e-4f) ++above;
                 if (above != 1)
@@ -1272,6 +1295,34 @@ int main(int argc, char** argv)
                 for (const ControlPoint& c : p) if (c.pos.y < lo + 1e-4f) ++onFloor;
                 if (onFloor != 2)
                 { std::printf("  hexagon has no flat base (%d verts lowest)\n", onFloor); ++bad; }
+            }
+
+            // A fillet's two handles must be the same length ON SCREEN. Slot x is
+            // a fraction of WIDTH and y of HEIGHT, so a generator that produces a
+            // scalar handle length in already-squashed units gets its horizontal
+            // component stretched by the aspect: one flank of every corner comes
+            // out longer than the other and the arc leans. Square test cells
+            // cannot show it -- this is the shape of the bug it is guarding.
+            {
+                std::vector<ControlPoint> p;
+                const float asp = 16.0f / 9.0f;
+                MakeShape(kShapeRectangle, 0, 40.0f * 0.01f,
+                          0.5f, 0.5f, 0.25f, 0.25f, asp, p);
+
+                float lo = 1e9f, hi = -1e9f;
+                for (const ControlPoint& c : p)
+                {
+                    // Back to pixels on a frame of height 1: x spans the aspect.
+                    const float hx = c.tan.x * asp, hy = c.tan.y;
+                    const float len = std::sqrt(hx * hx + hy * hy);
+                    lo = std::min(lo, len); hi = std::max(hi, len);
+                }
+                if (hi > 1e-6f && (hi - lo) / hi > 1e-3f)
+                {
+                    std::printf("  rounded rect handles uneven on 16:9 (%.5f vs %.5f)\n",
+                                lo, hi);
+                    ++bad;
+                }
             }
 
             std::printf("shape generators: %s\n", bad == 0 ? "ok" : "FAILED");

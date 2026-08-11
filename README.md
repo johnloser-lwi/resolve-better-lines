@@ -480,9 +480,12 @@ control characters and empty strings, and asserts that malformed input is reject
 
 ## Add Shape
 
-Rectangle, ellipse, triangle and polygon, written into a stroke slot as **ordinary control
+Rectangle, ellipse and regular polygon, written into a stroke slot as **ordinary control
 points** — then the generator gets out of the way. There is no live "rectangle object": what
 lands in the slot is points, keyframable and draggable like any others.
+
+There is deliberately no separate Triangle: a triangle is a three-sided polygon, and two
+controls for one idea is one control too many.
 
 That is the whole design decision. A shape that stayed a rectangle would need its own
 parameters, its own overlay handles and its own animation path, and would still be less useful
@@ -491,8 +494,8 @@ placing and sizing a shape needs no per-shape controls at all.
 
 | Control | Notes |
 |---|---|
-| **Shape** | Rectangle, Ellipse, Triangle, Polygon |
-| **Sides** | Polygon only, 3..16 |
+| **Shape** | Rectangle, Ellipse, Polygon |
+| **Sides** | Polygon only. 3 is a triangle. Range shrinks to 3..8 once Corner Radius leaves zero |
 | **Corner Radius** | % of the shape's *inscribed* radius; ignored by Ellipse |
 | **Size** | % of frame height. A starting point — resize with Transform Scale |
 | **Into** | `Next Free` picks the first stroke that is switched off, so adding never overwrites work in progress |
@@ -504,22 +507,37 @@ placing and sizing a shape needs no per-shape controls at all.
   **100% is "as round as this shape gets"** for all of them — a square at 100% is exactly a
   circle.
 - **Rounding costs two points per corner**, since each vertex becomes two points joined by an
-  arc. A 16-gon fits sharp but not rounded, so the button refuses rather than quietly dropping
-  sides, and says how many would fit.
+  arc, and the slot ceiling is 16. So the *range* of Sides halves the moment Corner Radius
+  leaves zero, rather than the button refusing a combination the controls happily allowed you
+  to dial in. A slider that stops where the limit is explains the limit better than a dialog
+  does. The refusal survives as an unreachable backstop, because drawing a polygon with
+  silently fewer sides than asked for is the one outcome worse than a message.
 - **Handles are symmetric**, because a slot stores one tangent per point. That costs nothing
   here: a circle's four-point bezier is naturally symmetric, and at a rounded corner the
   mirrored handle points back along the straight edge it came from — collinear with it, so the
   edge stays exactly straight. Confirmed by the flattener, which still emits one vertex per
   straight edge (a sharp octagon flattens to 9 points, not 90).
-- **The x axis is divided by the frame aspect.** Slot x is a fraction of frame *width* and y of
-  *height*, so a circle built with equal radii comes out an ellipse 1.78x too wide on a 16:9
-  timeline. A square test render cannot show this, so `--sheet check` asserts it numerically.
+- **The x axis is divided by the frame aspect — once, at the very end.** Slot x is a fraction of
+  frame *width* and y of *height*, so a circle built with equal radii comes out an ellipse 1.78x
+  too wide on a 16:9 timeline. Every generator therefore works in **square units** and `MakeShape`
+  squashes x last, for positions and tangents alike.
+
+  Doing it any earlier is a real bug and was one: a fillet's handle length is a single scalar,
+  and applying a scalar in units whose two axes have different scales stretches its horizontal
+  component by the aspect. One flank of every rounded corner came out an aspect-ratio too long
+  and the arc leaned into the vertical edge. Squashing last is also exactly right geometrically,
+  since square units map to pixels by a single factor (the frame height), so a circular fillet
+  stays circular.
+
+  Neither the stretched circle nor the leaning corner can appear in a square test cell, so
+  `--sheet check` asserts both numerically — the corner one by requiring every handle of a
+  rounded rectangle to be the same length *in pixels* on a 16:9 frame.
 - **Existing keys on the target slot are deleted first.** They describe the shape that used to
   be there and would win at every frame, making the button look like it had done nothing.
 - Shape controls are `AddParamUI`, so they neither invalidate the render cache nor appear in
   presets — they describe the *next* shape, not the current look.
 
-`linetest --sheet shapes` renders all twelve variants. Note the contact sheet writes its rows
+`linetest --sheet shapes` renders twelve variants. Note the contact sheet writes its rows
 top-down and so displays every case **y-inverted**; orientation is asserted numerically in
 `--sheet check` instead, which is why the triangle points down in the sheet and up in Resolve.
 

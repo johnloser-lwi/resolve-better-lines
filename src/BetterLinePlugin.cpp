@@ -274,6 +274,7 @@ private:
     OFX::DoubleParam*  _gradStart = nullptr;
     OFX::DoubleParam*  _gradEnd   = nullptr;
     OFX::DoubleParam*  _gradMid   = nullptr;
+    OFX::BooleanParam* _gradLoop  = nullptr;
 
     OFX::BooleanParam* _dash      = nullptr;
     OFX::DoubleParam*  _dashLen   = nullptr;
@@ -454,6 +455,7 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _gradStart = fetchDoubleParam(kParamGradStart);
     _gradEnd   = fetchDoubleParam(kParamGradEnd);
     _gradMid   = fetchDoubleParam(kParamGradMid);
+    _gradLoop  = fetchBooleanParam(kParamGradLoop);
 
     _dash      = fetchBooleanParam(kParamDash);
     _dashLen   = fetchDoubleParam(kParamDashLen);
@@ -780,12 +782,13 @@ void BetterLinePlugin::addShape()
     _shapeSize->getValue(sizePct);
     _shapeSides->getValue(sides);
 
-    const bool rounded = (kind != kShapeEllipse) && (corner > 0.05);
+    const bool rounded = (kind != kShapeEllipse) && (corner > 0.01);
 
-    // The point ceiling is a hard structural limit, and rounding doubles the
-    // cost, so a 16-gon that fits sharp does not fit rounded. Clamping quietly
-    // would draw a shape with the wrong number of sides, which is worse than
-    // being told.
+    // Rounding costs two points per corner, so a polygon that fits sharp may not
+    // fit rounded. syncVisibility keeps Sides inside the achievable range as the
+    // radius moves, so this should be unreachable -- it stays as a backstop
+    // because drawing a polygon with silently fewer sides than asked for is the
+    // one outcome worse than a message.
     const int maxSides = MaxSidesFor(kMaxPoints, rounded);
     if (kind == kShapePolygon && sides > maxSides)
     {
@@ -871,8 +874,8 @@ void BetterLinePlugin::addShape()
 
     syncVisibility();
 
-    static const char* kNames[] = {"rectangle", "ellipse", "triangle", "polygon"};
-    bl::ProbeLog("add shape: " + std::string(kNames[kind < 0 ? 0 : (kind > 3 ? 3 : kind)]) +
+    static const char* kNames[] = {"rectangle", "ellipse", "polygon"};
+    bl::ProbeLog("add shape: " + std::string(kNames[kind < 0 ? 0 : (kind > 2 ? 2 : kind)]) +
                  " -> stroke " + std::to_string(slot + 1) +
                  ", " + std::to_string(pts.size()) + " points");
 }
@@ -971,6 +974,22 @@ void BetterLinePlugin::syncVisibility()
             const int kind = ChoiceAt(_shapeKind, 0.0, kShapeRectangle, kShapePolygon);
             _shapeSides->setIsSecret(kind != kShapePolygon);
             _shapeCorner->setIsSecret(kind == kShapeEllipse);
+
+            // Rounding costs two points per corner, so the achievable side count
+            // halves the moment the radius leaves zero. Moving the RANGE rather
+            // than only validating on the button press means the control cannot
+            // be put into a state the button has to refuse -- a slider that stops
+            // where the limit is explains the limit better than a dialog does.
+            double corner = 0.0;
+            _shapeCorner->getValue(corner);
+            const int maxSides = MaxSidesFor(kMaxPoints, corner > 0.01);
+
+            _shapeSides->setRange(3, maxSides);
+            _shapeSides->setDisplayRange(3, maxSides);
+
+            int sides = 3;
+            _shapeSides->getValue(sides);
+            if (sides > maxSides) _shapeSides->setValue(maxSides);
         }
 
         int strokes = 1;
@@ -1029,7 +1048,9 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
     if (_applyingPreset) return;
 
     if (p_ParamName == kParamShapeAdd)     { addShape(); return; }
-    if (p_ParamName == kParamShapeKind)    { syncVisibility(); return; }
+    // The radius decides how many sides still fit, so it drives visibility too.
+    if (p_ParamName == kParamShapeKind ||
+        p_ParamName == kParamShapeCorner)  { syncVisibility(); return; }
 
     if (p_ParamName == kParamImportSvg)    { importSvg(); return; }
     if (p_ParamName == kParamClearImport)
@@ -1196,6 +1217,9 @@ Style BetterLinePlugin::styleAt(double t, double frameHeight, double renderScale
     st.gradStart = static_cast<float>(DoubleAt(_gradStart, t));
     st.gradEnd   = static_cast<float>(DoubleAt(_gradEnd, t));
     st.gradMid   = static_cast<float>(DoubleAt(_gradMid, t));
+    // Only a request at this point: whether it applies depends on the stroke
+    // being closed, which is per-stroke and so decided in buildScene.
+    st.gradLoop  = BoolAt(_gradLoop, t);
 
     return st;
 }
@@ -1456,6 +1480,9 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
         // per stroke, an animated opacity or thickness would be identical across
         // all of them and only the trim would appear to stagger.
         Style     st   = style;
+        // The seam only exists on a closed contour, so folding an open path's
+        // gradient would just halve its range for no reason.
+        st.gradLoop    = style.gradLoop && stroke.closed;
         TrimState trim = baseTrim;
         float     dashPhasePx = baseDashPct * static_cast<float>(pctToPx);
         float     thickPct    = baseThickPct;
@@ -2034,7 +2061,8 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
             p->setLabels("Shape", "Shape", "Shape");
             p->appendOption("Rectangle");
             p->appendOption("Ellipse");
-            p->appendOption("Triangle");
+            // No separate Triangle: it is a three-sided polygon, and two controls
+            // for one idea is one control too many.
             p->appendOption("Polygon");
             p->setDefault(kShapeRectangle);
             p->setAnimates(false);
@@ -2044,9 +2072,9 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         {
             OFX::IntParamDescriptor* p = p_Desc.defineIntParam(kParamShapeSides);
             p->setLabels("Sides", "Sides", "Sides");
-            p->setHint("Number of sides for a polygon. Rounded corners cost two points "
-                       "each, so fewer sides fit when Corner Radius is above zero.");
-            p->setDefault(6);
+            p->setHint("Number of sides. Set 3 for a triangle. Rounded corners cost two "
+                       "points each, so the maximum halves once Corner Radius leaves zero.");
+            p->setDefault(3);
             p->setRange(3, kMaxPoints);
             p->setDisplayRange(3, kMaxPoints);
             p->setAnimates(false);
@@ -2059,8 +2087,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
             // Relative, not absolute: the whole point of the generator is that the
             // shape gets resized afterwards by Transform, and an absolute radius
             // would swallow a shape that was later scaled down.
-            p->setHint("Corner rounding as a percentage of the shape's half-size, so it "
-                       "survives being scaled afterwards. Ignored by Ellipse.");
+            p->setHint("Corner rounding as a percentage of the shape's inscribed radius, "
+                       "so 100% is as round as the shape gets and a square becomes a "
+                       "circle. Relative, so it survives being scaled afterwards. "
+                       "Ignored by Ellipse.");
             p->setDefault(0.0);
             p->setRange(0.0, 100.0);
             p->setDisplayRange(0.0, 100.0);
@@ -2381,6 +2411,13 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         DefineDouble(p_Desc, page, g, kParamGradMid, "Gradient Midpoint",
                      "Biases where the two colours are evenly mixed.",
                      0.5, 0.02, 0.98, 0.02, 0.98);
+
+        DefineBool(p_Desc, page, g, kParamGradLoop, "Seamless on Closed Paths",
+                   "For Along Path on a closed shape, runs the ramp out and back so it "
+                   "reaches the far colour halfway round and returns. Without it the "
+                   "start and end of the ramp meet at the path's start point and show "
+                   "as a hard seam across a contour that has no edge there. "
+                   "Ignored by open paths.", true);
     }
 
     // --- dashes --------------------------------------------------------------

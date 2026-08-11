@@ -206,6 +206,17 @@ struct Style
     float gradEnd   = 1.0f;
     float gradMid   = 0.5f;
 
+    /// Fold the Along gradient so it runs out and back, reaching the far colour
+    /// at the MIDDLE of the path and returning to the near colour at the end.
+    ///
+    /// For a closed path this is the difference between a gradient and a visible
+    /// seam. Arc length runs 0..1 from the start point round to the start point
+    /// again, so an unfolded ramp puts its two ENDS next to each other at a
+    /// place the shape has no edge -- a hard join across the middle of a
+    /// continuous contour. Folded, both ends of the ramp are the same colour, so
+    /// the seam closes into itself and the only thing left is the gradient.
+    bool  gradLoop  = false;
+
     /** @brief Largest distance from the centreline at which this style still
      *         paints anything.
      *
