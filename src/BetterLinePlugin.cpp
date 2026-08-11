@@ -19,6 +19,7 @@
 #include "core/PathBuild.h"
 #include "core/SvgPath.h"
 #include "core/Raster.h"
+#include "core/Shapes.h"
 #include "core/TileGrid.h"
 
 #include "interact/Overlay.h"
@@ -326,6 +327,15 @@ private:
     OFX::StringParam* _presetName   = nullptr;
     OFX::StringParam* _presetFolder = nullptr;
 
+    // --- shape generator -----------------------------------------------------
+    void addShape();
+
+    OFX::ChoiceParam*  _shapeKind   = nullptr;
+    OFX::IntParam*     _shapeSides  = nullptr;
+    OFX::DoubleParam*  _shapeCorner = nullptr;
+    OFX::DoubleParam*  _shapeSize   = nullptr;
+    OFX::ChoiceParam*  _shapeSlot   = nullptr;
+
     // --- imported paths ------------------------------------------------------
     void importSvg();
 
@@ -485,6 +495,12 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
         _stAntic[i]    = fetchDoubleParam(StageParam(kStageAntic, out));
         _stOver[i]     = fetchDoubleParam(StageParam(kStageOver, out));
     }
+
+    _shapeKind   = fetchChoiceParam(kParamShapeKind);
+    _shapeSides  = fetchIntParam(kParamShapeSides);
+    _shapeCorner = fetchDoubleParam(kParamShapeCorner);
+    _shapeSize   = fetchDoubleParam(kParamShapeSize);
+    _shapeSlot   = fetchChoiceParam(kParamShapeSlot);
 
     _importShow  = fetchBooleanParam(kParamImportShow);
     _importCol   = fetchBooleanParam(kParamImportCol);
@@ -753,6 +769,114 @@ void BetterLinePlugin::resetAll()
     syncVisibility();
 }
 
+void BetterLinePlugin::addShape()
+{
+    const int kind   = ChoiceAt(_shapeKind, 0.0, kShapeRectangle, kShapePolygon);
+    const int slotSel = ChoiceAt(_shapeSlot, 0.0, 0, kMaxStrokes);
+
+    double corner = 0.0, sizePct = 40.0;
+    int    sides  = 6;
+    _shapeCorner->getValue(corner);
+    _shapeSize->getValue(sizePct);
+    _shapeSides->getValue(sides);
+
+    const bool rounded = (kind != kShapeEllipse) && (corner > 0.05);
+
+    // The point ceiling is a hard structural limit, and rounding doubles the
+    // cost, so a 16-gon that fits sharp does not fit rounded. Clamping quietly
+    // would draw a shape with the wrong number of sides, which is worse than
+    // being told.
+    const int maxSides = MaxSidesFor(kMaxPoints, rounded);
+    if (kind == kShapePolygon && sides > maxSides)
+    {
+        std::ostringstream m;
+        m << "A " << sides << "-sided polygon needs "
+          << ShapePointCount(kind, sides, rounded) << " points, and a stroke holds "
+          << kMaxPoints << ".";
+        if (rounded) m << "\n\nRounded corners cost two points each. Without them, "
+                       << MaxSidesFor(kMaxPoints, false) << " sides fit.";
+        sendMessage(OFX::Message::eMessageError, "", m.str());
+        return;
+    }
+
+    // "Next free" means the first stroke that is switched off. A shape written
+    // over a stroke someone is working on is not a convenience.
+    int slot = slotSel - 1;
+    if (slotSel == 0)
+    {
+        slot = -1;
+        for (int s = 0; s < kMaxStrokes; ++s)
+        {
+            bool on = false;
+            _sEnable[s]->getValue(on);
+            if (!on) { slot = s; break; }
+        }
+        if (slot < 0)
+        {
+            sendMessage(OFX::Message::eMessageError, "",
+                        "All " + std::to_string(kMaxStrokes) +
+                        " strokes are in use. Pick one to overwrite, or switch one off.");
+            return;
+        }
+    }
+
+    // Slot x is a fraction of WIDTH and y a fraction of HEIGHT, so a shape built
+    // with equal radii comes out stretched by the frame aspect. The generators
+    // divide x by this to undo that; without it a "circle" on a 16:9 timeline is
+    // an ellipse nearly twice as wide as it is tall.
+    double aspect = 1.0;
+    if (_srcClip && _srcClip->isConnected())
+    {
+        const OfxRectD rod = _srcClip->getRegionOfDefinition(0.0);
+        const double w = rod.x2 - rod.x1, h = rod.y2 - rod.y1;
+        if (w > 0.0 && h > 0.0) aspect = w / h;
+    }
+
+    const float half = static_cast<float>(sizePct) * 0.005f;   // % of height -> half-extent
+
+    std::vector<ControlPoint> pts;
+    MakeShape(kind, sides, static_cast<float>(corner) * 0.01f,
+              0.5f, 0.5f, half, half, static_cast<float>(aspect), pts);
+
+    if (pts.size() < 3) return;
+    if (pts.size() > static_cast<size_t>(kMaxPoints)) pts.resize(static_cast<size_t>(kMaxPoints));
+
+    {
+        bl::EditBlock block(this, "Add Shape");
+
+        for (size_t i = 0; i < pts.size(); ++i)
+        {
+            OFX::Double2DParam* p = posParam(slot, static_cast<int>(i));
+            OFX::Double2DParam* q = tanParam(slot, static_cast<int>(i));
+            if (!p || !q) continue;
+
+            // Any keys already on this slot describe the shape that used to be
+            // here, and would otherwise win at every frame -- the button would
+            // look like it had done nothing. Spawning a shape is a structural
+            // act, so the slot is cleared rather than keyed.
+            try { p->deleteAllKeys(); q->deleteAllKeys(); } catch (...) {}
+
+            p->setValue(pts[i].pos.x, pts[i].pos.y);
+            q->setValue(pts[i].tan.x, pts[i].tan.y);
+        }
+
+        _sCount[slot]->setValue(static_cast<int>(pts.size()));
+        _sClosed[slot]->setValue(true);
+        _sEnable[slot]->setValue(true);
+
+        int live = 0;
+        _strokeCount->getValue(live);
+        if (live < slot + 1) _strokeCount->setValue(slot + 1);
+    }
+
+    syncVisibility();
+
+    static const char* kNames[] = {"rectangle", "ellipse", "triangle", "polygon"};
+    bl::ProbeLog("add shape: " + std::string(kNames[kind < 0 ? 0 : (kind > 3 ? 3 : kind)]) +
+                 " -> stroke " + std::to_string(slot + 1) +
+                 ", " + std::to_string(pts.size()) + " points");
+}
+
 void BetterLinePlugin::importSvg()
 {
     // Outside any edit block: the dialog pumps its own message loop.
@@ -843,6 +967,12 @@ void BetterLinePlugin::syncVisibility()
             _xfScaleY->setIsSecret(link);
         }
 
+        {
+            const int kind = ChoiceAt(_shapeKind, 0.0, kShapeRectangle, kShapePolygon);
+            _shapeSides->setIsSecret(kind != kShapePolygon);
+            _shapeCorner->setIsSecret(kind == kShapeEllipse);
+        }
+
         int strokes = 1;
         _strokeCount->getValue(strokes);
         strokes = strokes < 1 ? 1 : (strokes > kMaxStrokes ? kMaxStrokes : strokes);
@@ -897,6 +1027,9 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
     // Reacting to each would run syncVisibility hundreds of times for one Load,
     // and would let an easing control stamp Custom over a preset's own preset.
     if (_applyingPreset) return;
+
+    if (p_ParamName == kParamShapeAdd)     { addShape(); return; }
+    if (p_ParamName == kParamShapeKind)    { syncVisibility(); return; }
 
     if (p_ParamName == kParamImportSvg)    { importSvg(); return; }
     if (p_ParamName == kParamClearImport)
@@ -1886,6 +2019,90 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         }
     }
 
+    // --- shape generator -----------------------------------------------------
+    //
+    // Writes into an ordinary stroke slot and then gets out of the way: what it
+    // produces is points, keyframable and editable like any others. A shape that
+    // stayed "a rectangle" would need its own parameters, its own overlay and its
+    // own animation path, and would still be less useful the moment someone
+    // wanted to drag one corner.
+    {
+        OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "shapeGroup", "Add Shape");
+
+        {
+            OFX::ChoiceParamDescriptor* p = p_Desc.defineChoiceParam(kParamShapeKind);
+            p->setLabels("Shape", "Shape", "Shape");
+            p->appendOption("Rectangle");
+            p->appendOption("Ellipse");
+            p->appendOption("Triangle");
+            p->appendOption("Polygon");
+            p->setDefault(kShapeRectangle);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::IntParamDescriptor* p = p_Desc.defineIntParam(kParamShapeSides);
+            p->setLabels("Sides", "Sides", "Sides");
+            p->setHint("Number of sides for a polygon. Rounded corners cost two points "
+                       "each, so fewer sides fit when Corner Radius is above zero.");
+            p->setDefault(6);
+            p->setRange(3, kMaxPoints);
+            p->setDisplayRange(3, kMaxPoints);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeCorner);
+            p->setLabels("Corner Radius", "Corner Radius", "Corner Radius");
+            // Relative, not absolute: the whole point of the generator is that the
+            // shape gets resized afterwards by Transform, and an absolute radius
+            // would swallow a shape that was later scaled down.
+            p->setHint("Corner rounding as a percentage of the shape's half-size, so it "
+                       "survives being scaled afterwards. Ignored by Ellipse.");
+            p->setDefault(0.0);
+            p->setRange(0.0, 100.0);
+            p->setDisplayRange(0.0, 100.0);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::DoubleParamDescriptor* p = p_Desc.defineDoubleParam(kParamShapeSize);
+            p->setLabels("Size", "Size", "Size");
+            p->setHint("Size as a percentage of frame height. Only a starting point -- "
+                       "use Transform Scale to size the shape once it is placed.");
+            p->setDefault(40.0);
+            p->setRange(1.0, 200.0);
+            p->setDisplayRange(5.0, 100.0);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::ChoiceParamDescriptor* p = p_Desc.defineChoiceParam(kParamShapeSlot);
+            p->setLabels("Into", "Into", "Into");
+            p->setHint("Which stroke to write. Next Free picks the first stroke that is "
+                       "switched off, so adding shapes never overwrites your work.");
+            p->appendOption("Next Free");
+            for (int s = 0; s < kMaxStrokes; ++s)
+                p->appendOption("Stroke " + std::to_string(s + 1));
+            p->setDefault(0);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamShapeAdd);
+            p->setLabels("Add Shape", "Add Shape", "Add Shape");
+            p->setHint("Writes the shape into a stroke as ordinary control points. "
+                       "Clears any keyframes on that stroke's points first.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+    }
+
     // --- imported paths ------------------------------------------------------
     {
         OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "importGroup", "Import");
@@ -1914,9 +2131,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         {
             OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamImportSvg);
             p->setLabels("Import SVG...", "Import SVG...", "Import SVG...");
-            p->setHint("Reads path geometry only -- fills, gradients and text are "
-                       "ignored. Imported paths have no point limit, but are edited as "
-                       "a whole through Transform and Trim rather than point by point.");
+            p->setHint("Reads path geometry with its flat fill and stroke paint. "
+                       "Gradients, filters and text are ignored. Imported paths have no "
+                       "point limit, but are edited as a whole through Transform and "
+                       "Trim rather than point by point.");
             p->setParent(*g);
             AddParamUI(page, p);
         }

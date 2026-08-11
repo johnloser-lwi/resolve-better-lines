@@ -478,6 +478,68 @@ control characters and empty strings, and asserts that malformed input is reject
 
 *Not saved:* keyframe curves. A preset stores each parameter's current value.
 
+## Add Shape
+
+Rectangle, ellipse, triangle and polygon, written into a stroke slot as **ordinary control
+points** — then the generator gets out of the way. There is no live "rectangle object": what
+lands in the slot is points, keyframable and draggable like any others.
+
+That is the whole design decision. A shape that stayed a rectangle would need its own
+parameters, its own overlay handles and its own animation path, and would still be less useful
+the moment someone wanted to move one corner. Since the plugin already has a global Transform,
+placing and sizing a shape needs no per-shape controls at all.
+
+| Control | Notes |
+|---|---|
+| **Shape** | Rectangle, Ellipse, Triangle, Polygon |
+| **Sides** | Polygon only, 3..16 |
+| **Corner Radius** | % of the shape's *inscribed* radius; ignored by Ellipse |
+| **Size** | % of frame height. A starting point — resize with Transform Scale |
+| **Into** | `Next Free` picks the first stroke that is switched off, so adding never overwrites work in progress |
+
+- **Corner Radius is measured against the inscribed radius**, the distance from the centre to
+  the middle of an edge — not to a vertex. Vertex distance is not comparable across shapes: a
+  triangle's corners sit twice as far out as its edges, so the percentage that gently softened a
+  rectangle turned a triangle into a blob. Measured this way a triangle and a square agree, and
+  **100% is "as round as this shape gets"** for all of them — a square at 100% is exactly a
+  circle.
+- **Rounding costs two points per corner**, since each vertex becomes two points joined by an
+  arc. A 16-gon fits sharp but not rounded, so the button refuses rather than quietly dropping
+  sides, and says how many would fit.
+- **Handles are symmetric**, because a slot stores one tangent per point. That costs nothing
+  here: a circle's four-point bezier is naturally symmetric, and at a rounded corner the
+  mirrored handle points back along the straight edge it came from — collinear with it, so the
+  edge stays exactly straight. Confirmed by the flattener, which still emits one vertex per
+  straight edge (a sharp octagon flattens to 9 points, not 90).
+- **The x axis is divided by the frame aspect.** Slot x is a fraction of frame *width* and y of
+  *height*, so a circle built with equal radii comes out an ellipse 1.78x too wide on a 16:9
+  timeline. A square test render cannot show this, so `--sheet check` asserts it numerically.
+- **Existing keys on the target slot are deleted first.** They describe the shape that used to
+  be there and would win at every frame, making the button look like it had done nothing.
+- Shape controls are `AddParamUI`, so they neither invalidate the render cache nor appear in
+  presets — they describe the *next* shape, not the current look.
+
+`linetest --sheet shapes` renders all twelve variants. Note the contact sheet writes its rows
+top-down and so displays every case **y-inverted**; orientation is asserted numerically in
+`--sheet check` instead, which is why the triangle points down in the sheet and up in Resolve.
+
+### Does scaling a generated shape cost quality?
+
+**No** — and this is why the generator only needs a rough Size. The global Transform is applied
+to control points in **pixel space, before flattening**:
+
+```
+slot point -> pixels -> Xform2D::Apply -> FlattenStroke -> SDF
+```
+
+So a scaled-up shape is re-flattened at its final on-screen size and rasterized analytically by
+the SDF. Scaling up *increases* subdivision rather than stretching a fixed mesh — the opposite
+of resampling an image. There is nothing to lose.
+
+One consequence worth knowing: **Transform does not scale stroke Thickness.** Scale a square up
+and its outline stays the same weight, as with SVG's `vector-effect: non-scaling-stroke`. That
+is usually what motion design wants, but if you need the weight to grow, animate Thickness.
+
 ## SVG import
 
 **Import SVG** reads path geometry into a second store that sits alongside the keyframable

@@ -94,6 +94,14 @@ constexpr const char* kParamImportCol   = "importUseColours";
 constexpr const char* kParamImportWid   = "importUseWidths";
 constexpr const char* kParamImportScale = "importWidthScale";
 
+// --- shape generator ---------------------------------------------------------
+constexpr const char* kParamShapeKind   = "shapeKind";
+constexpr const char* kParamShapeSides  = "shapeSides";
+constexpr const char* kParamShapeCorner = "shapeCorner";
+constexpr const char* kParamShapeSize   = "shapeSize";
+constexpr const char* kParamShapeSlot   = "shapeTarget";
+constexpr const char* kParamShapeAdd    = "shapeAdd";
+
 // --- global transform --------------------------------------------------------
 constexpr const char* kParamXfPos    = "xformPosition";
 constexpr const char* kParamXfRot    = "xformRotation";

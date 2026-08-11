@@ -19,7 +19,12 @@
 #include "core/PathBuild.h"
 #include "core/SvgPath.h"
 #include "core/Raster.h"
+#include "core/Shapes.h"
 #include "core/TileGrid.h"
+
+// Only for kMaxPoints: the slot ceiling is what makes a shape's point count a
+// correctness question rather than a detail. No OFX headers come with it.
+#include "ParamNames.h"
 
 #include <cstdio>
 #include <cstring>
@@ -808,6 +813,62 @@ std::vector<Case> MakeFillCases()
     return cases;
 }
 
+/** @brief The shape generators, at the size and rounding the button produces.
+ *
+ * Cells are square, so aspect is 1 here and the aspect correction is asserted
+ * numerically in the `check` sheet instead -- a stretched circle is exactly the
+ * kind of bug a square test render cannot show.
+ */
+std::vector<Case> MakeShapeCases()
+{
+    std::vector<Case> cases;
+
+    auto shape = [](const char* name, int kind, int sides, float cornerPct,
+                    bool fill) {
+        Case c;
+        c.name = name;
+        c.stroke.closed = true;
+
+        std::vector<ControlPoint> pts;
+        MakeShape(kind, sides, cornerPct * 0.01f, 0.5f, 0.5f, 0.34f, 0.34f, 1.0f, pts);
+
+        // Slot units are 0..1 across the frame; the cases are authored in the
+        // 256px cell the sheet scales from.
+        for (ControlPoint& p : pts)
+        { p.pos = p.pos * 256.0f; p.tan = p.tan * 256.0f; }
+        c.stroke.pts = pts;
+
+        c.style.halfWidth = 5.0f;
+        c.style.feather   = 1.2f;
+        c.style.color     = Color(1.0f, 1.0f, 1.0f, 1.0f);
+        if (fill)
+        {
+            c.style.fill      = true;
+            c.style.fillColor = Color(0.2f, 0.45f, 0.9f, 1.0f);
+        }
+        return c;
+    };
+
+    cases.push_back(shape("rect",            kShapeRectangle, 0, 0.0f,   false));
+    cases.push_back(shape("rect r30",        kShapeRectangle, 0, 30.0f,  false));
+    // 100% asks for a fillet the full half-size; the per-corner clamp turns it
+    // into a stadium rather than letting neighbouring corners cross.
+    cases.push_back(shape("rect r100",       kShapeRectangle, 0, 100.0f, false));
+    cases.push_back(shape("ellipse",         kShapeEllipse,   0, 0.0f,   false));
+
+    cases.push_back(shape("triangle",        kShapeTriangle,  0, 0.0f,   false));
+    cases.push_back(shape("triangle r30",    kShapeTriangle,  0, 30.0f,  false));
+    cases.push_back(shape("pentagon",        kShapePolygon,   5, 0.0f,   false));
+    cases.push_back(shape("hexagon r30",     kShapePolygon,   6, 30.0f,  false));
+
+    cases.push_back(shape("octagon",         kShapePolygon,   8, 0.0f,   false));
+    cases.push_back(shape("16-gon",          kShapePolygon,  16, 0.0f,   false));
+    cases.push_back(shape("rect r40 filled", kShapeRectangle, 0, 40.0f,  true));
+    cases.push_back(shape("ellipse filled",  kShapeEllipse,   0, 0.0f,   true));
+
+    return cases;
+}
+
 /** Gradient diagnostics. Fat strokes, because the whole question is what the
  *  ramp does ACROSS the width, and that is invisible on a thin line. */
 std::vector<Case> MakeGradCases()
@@ -1133,6 +1194,90 @@ int main(int argc, char** argv)
             failures += bad;
         }
 
+        {   // Shape generators. Both assertions guard failures that LOOK fine in
+            // a square test render and only appear on a real timeline.
+            int bad = 0;
+
+            auto extent = [](const std::vector<ControlPoint>& p,
+                             float& w, float& h) {
+                float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+                for (const ControlPoint& c : p)
+                {
+                    x0 = std::min(x0, c.pos.x); x1 = std::max(x1, c.pos.x);
+                    y0 = std::min(y0, c.pos.y); y1 = std::max(y1, c.pos.y);
+                }
+                w = x1 - x0; h = y1 - y0;
+            };
+
+            // A circle must be round on a 16:9 frame. Slot x is a fraction of
+            // WIDTH and y of HEIGHT, so a generator that forgets to divide by the
+            // aspect produces an ellipse 1.78x too wide -- and a square test cell
+            // would never show it.
+            {
+                std::vector<ControlPoint> p;
+                MakeShape(kShapeEllipse, 0, 0.0f, 0.5f, 0.5f, 0.2f, 0.2f, 16.0f / 9.0f, p);
+                float w = 0, h = 0;
+                extent(p, w, h);
+                const float ratio = (w * (16.0f / 9.0f)) / h;
+                if (std::fabs(ratio - 1.0f) > 1e-3f)
+                { std::printf("  ellipse not round on 16:9 (ratio %.4f)\n", ratio); ++bad; }
+            }
+
+            // Point counts drive the slot budget, so a generator that quietly
+            // returns more than ShapePointCount promised would be silently
+            // truncated by the caller and draw a shape with a corner missing.
+            const struct { int kind; int sides; float corner; } kCases[] = {
+                {kShapeRectangle, 0, 0.0f}, {kShapeRectangle, 0, 0.4f},
+                {kShapeEllipse,   0, 0.0f}, {kShapeEllipse,   0, 0.4f},
+                {kShapeTriangle,  0, 0.0f}, {kShapeTriangle,  0, 0.4f},
+                {kShapePolygon,   5, 0.0f}, {kShapePolygon,   5, 0.4f},
+                {kShapePolygon,   8, 0.0f}, {kShapePolygon,   8, 0.3f},
+            };
+            for (const auto& k : kCases)
+            {
+                std::vector<ControlPoint> p;
+                MakeShape(k.kind, k.sides, k.corner, 0.5f, 0.5f, 0.2f, 0.2f, 1.0f, p);
+                const bool rounded = (k.kind != kShapeEllipse) && (k.corner > 0.0f);
+                const int want = ShapePointCount(k.kind, k.sides, rounded);
+                if (static_cast<int>(p.size()) != want)
+                {
+                    std::printf("  shape kind=%d sides=%d corner=%.2f: %zu points, promised %d\n",
+                                k.kind, k.sides, k.corner, p.size(), want);
+                    ++bad;
+                }
+                if (static_cast<int>(p.size()) > kMaxPoints)
+                { std::printf("  shape exceeds slot ceiling\n"); ++bad; }
+            }
+
+            // Orientation, in the plugin's y-UP space. The contact sheet writes
+            // its rows top-down and so displays every case inverted, which makes
+            // it useless for judging which way a triangle points -- hence a
+            // numeric check rather than a visual one.
+            {
+                std::vector<ControlPoint> p;
+                MakeShape(kShapeTriangle, 3, 0.0f, 0.5f, 0.5f, 0.34f, 0.34f, 1.0f, p);
+                int above = 0;
+                for (const ControlPoint& c : p) if (c.pos.y > 0.5f + 1e-4f) ++above;
+                if (above != 1)
+                { std::printf("  triangle does not point up (%d verts above centre)\n", above); ++bad; }
+            }
+            {
+                // An even-sided polygon rests on a flat edge: two vertices share
+                // the lowest y.
+                std::vector<ControlPoint> p;
+                MakeShape(kShapePolygon, 6, 0.0f, 0.5f, 0.5f, 0.34f, 0.34f, 1.0f, p);
+                float lo = 1e9f;
+                for (const ControlPoint& c : p) lo = std::min(lo, c.pos.y);
+                int onFloor = 0;
+                for (const ControlPoint& c : p) if (c.pos.y < lo + 1e-4f) ++onFloor;
+                if (onFloor != 2)
+                { std::printf("  hexagon has no flat base (%d verts lowest)\n", onFloor); ++bad; }
+            }
+
+            std::printf("shape generators: %s\n", bad == 0 ? "ok" : "FAILED");
+            failures += bad;
+        }
+
         std::printf("check: %d failures\n", failures);
         return failures == 0 ? 0 : 1;
     }
@@ -1317,6 +1462,7 @@ int main(int argc, char** argv)
     else if (std::strcmp(sheetName, "anim") == 0) cases = MakeAnimCases();
     else if (std::strcmp(sheetName, "wiggle") == 0) cases = MakeWiggleCases();
     else if (std::strcmp(sheetName, "sweep") == 0)  cases = MakeSweepCases();
+    else if (std::strcmp(sheetName, "shapes") == 0) cases = MakeShapeCases();
     else                                          cases = MakeCases();
 
     const int cols  = 4;
