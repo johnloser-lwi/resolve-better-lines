@@ -777,14 +777,37 @@ void BetterLinePlugin::importSvg()
         return;
     }
 
+    // What the artwork actually contains decides the starting state, because the
+    // two kinds of SVG want opposite defaults and neither is discoverable.
+    bool anyFill = false, anyStroke = false;
+    for (const Stroke& s : r.strokes)
+    {
+        anyFill   = anyFill   || s.paint.hasFill;
+        anyStroke = anyStroke || s.paint.hasStroke;
+    }
+
     {
         bl::EditBlock block(this, "Import SVG");
         _pathBlob->setValue(StrokesToBlob(r.strokes));
         _importShow->setValue(true);
+
+        // Fill is a master switch over the per-path flag, so filled artwork has
+        // to turn it on or it imports invisible.
+        if (anyFill) _fill->setValue(true);
+
+        // Artwork with NO stroke anywhere is the common case -- most icon sets
+        // are drawn as filled silhouettes -- and it is exactly the case that
+        // arrives with nothing to draw on: Trim reveals a STROKE, so a shape
+        // that has none animates not at all. Handing those paths the global
+        // Thickness gives them an outline to draw, which is the reason someone
+        // brought a logo into a line plugin. Left alone when the file does carry
+        // strokes, since there the artwork's own widths are the better answer.
+        if (!anyStroke) _importWid->setValue(false);
     }
 
     std::ostringstream o;
     o << StemOf(path) << ": " << r.subpaths << " paths, " << r.points << " points";
+    if (!anyStroke) o << ", fill only";
     if (r.truncated) o << " (TRUNCATED -- the file was larger than the import limit)";
     _importInfo->setValue(o.str());
 
@@ -1317,16 +1340,25 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
                 if (k.hasFill)   st.fillColor = k.fillColor;
             }
 
-            // A path the artwork never stroked must not gain one, and a path it
-            // never filled must not gain a fill -- that is the whole difference
-            // between a logo and a silhouette.
-            st.fill = k.hasFill && (style.fill || k.hasFill);
-            if (!k.hasStroke) thickPct = 0.0f;
-            else if (useImportWid)
+            // The global Fill is a MASTER SWITCH over the per-path flag, not a
+            // separate opinion. Ignoring it left a fill-only import permanently
+            // filled with no way to turn it into an outline.
+            st.fill = style.fill && k.hasFill;
+
+            if (useImportWid)
             {
                 // Blob width is a fraction of the frame HEIGHT, and Thickness is
                 // a percentage of it, so the conversion is a factor of 100.
-                thickPct = k.width * 100.0f * importScale;
+                thickPct = k.hasStroke ? (k.width * 100.0f * importScale) : 0.0f;
+            }
+            else
+            {
+                // Off means "use MY thickness", and that has to include paths
+                // the artwork never stroked. Fill-only artwork is extremely
+                // common -- most icon sets are drawn that way -- and leaving
+                // those at zero meant an import with nothing to draw on, and so
+                // nothing for Trim to animate.
+                thickPct = baseThickPct;
             }
         }
 
@@ -1861,8 +1893,10 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
                    "On, each imported path keeps the colour it was drawn with. Off, the "
                    "whole import takes the global Colour.", true);
         DefineBool(p_Desc, page, g, kParamImportWid, "Use Imported Widths",
-                   "On, each imported path keeps the stroke width it was drawn with. "
-                   "Off, the whole import takes the global Thickness.", true);
+                   "On, each imported path keeps the stroke width it was drawn with, "
+                   "and a path drawn with no stroke gets none. Off, EVERY imported path "
+                   "takes the global Thickness -- which is how fill-only artwork gets "
+                   "an outline for Trim to draw on.", true);
         DefineDouble(p_Desc, page, g, kParamImportScale, "Imported Width Scale",
                      "Multiplies every imported stroke width, so a logo can be made "
                      "heavier or finer without losing its relative line weights.",

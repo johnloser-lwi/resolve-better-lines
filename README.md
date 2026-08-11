@@ -522,11 +522,37 @@ The blob is parsed once and cached against the string it came from. Reparsing te
 kilobytes every frame would make the per-frame cost scale with how detailed the artwork is,
 which is exactly backwards.
 
+### Paint, and the fill-only problem
+
+Each imported subpath carries the paint it was drawn with — stroke colour, fill colour, stroke
+width, and whether it had either at all. `Use Imported Colours` and `Use Imported Widths` are
+the escapes back to the global style, because artwork that silently disconnected the Colour and
+Thickness controls would be a worse problem than the single-colour silhouette it replaced.
+
+Two rules make those toggles behave, and both were bugs first:
+
+- **The global `Fill Closed Paths` is a master switch over the per-path flag, not a second
+  opinion.** Filled artwork used to be filled unconditionally, with no way to turn it back into
+  an outline.
+- **`Use Imported Widths` off means the global Thickness applies to *every* imported path,
+  including ones the artwork never stroked.** This is the one that matters. Most icon sets are
+  drawn as filled silhouettes with no stroke anywhere — one test file has five `fill`
+  declarations and zero `stroke` — and **Trim reveals a stroke**, so a shape with none animates
+  not at all. Importing such a file used to produce artwork that could not be drawn on, which
+  is the single reason someone brings a logo into a line plugin.
+
+So the importer picks the starting state from what the file actually contains: filled artwork
+turns the global Fill on, and artwork with **no** stroke anywhere turns `Use Imported Widths`
+off, handing every contour the global Thickness. Files that do carry strokes are left alone —
+there the artwork's own widths are the better answer. Both are ordinary parameters afterwards.
+
+A fill can't be trimmed instead, and deliberately: a trim is a reveal of the *line*, and a shape
+whose fill came and went with it would be a different shape every frame.
+
 ### Limitations
 
-- **Geometry only.** Fills, gradients, per-shape colours, stroke widths, masks and filters are
-  ignored — the plugin's own style controls decide the look. A multi-coloured logo imports as
-  one colour; per-shape colour needs the per-stroke style override, which is still outstanding.
+- **Gradients, masks and filters are ignored.** Only flat `fill` and `stroke` paint is read,
+  from either presentation attributes or an inline `style=`.
 - **Fill applies to closed subpaths only.** Line-art SVGs are open paths and will stroke but
   not fill, which is correct — there is no inside to fill.
 - **Text must be converted to outlines first.** There is no font rasterizer here.
