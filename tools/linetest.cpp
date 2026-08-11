@@ -1260,7 +1260,9 @@ int main(int argc, char** argv)
 
                 Polyline poly;
                 FlattenStroke(s, 0.2f, poly);
-                if (st.fill && s.closed) AppendFillContour(poly.pts, styleIdx, fill);
+                // No `closed` gate: this path is always imported, and an SVG
+                // fill implicitly closes its subpath. Matches the plugin.
+                if (st.fill) AppendFillContour(poly.pts, styleIdx, fill);
 
                 const size_t firstSeg = segs.size();
                 BuildStrokeSegments(poly, st, trim, s.closed, 0.0f, 0.0f, 0.0f, segs);

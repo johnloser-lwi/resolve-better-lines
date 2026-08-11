@@ -1396,7 +1396,16 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
         // Fill takes the WHOLE contour, before trim and dashes touch it. A trim
         // is a reveal of the line; a shape whose fill came and went with it would
         // be a different shape every frame rather than one being drawn.
-        if (st.fill && stroke.closed) AppendFillContour(poly.pts, styleIdx, fill);
+        //
+        // `closed` gates a HAND-DRAWN stroke, where it is the user's own toggle
+        // and "Fill Closed Paths" says so on the label. It must NOT gate an
+        // import: SVG fills implicitly close every subpath, Z or not, so there
+        // the fill attribute is the authority and `st.fill` already carries it.
+        // A cat drawn by Inkscape lost its nose to this -- one filled subpath
+        // among six stroked ones, written without a closing Z because filling it
+        // never needed one.
+        if (st.fill && (isImported || stroke.closed))
+            AppendFillContour(poly.pts, styleIdx, fill);
 
         const size_t firstSeg = segs.size();
         BuildStrokeSegments(poly, st, trim, stroke.closed,

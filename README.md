@@ -553,8 +553,11 @@ whose fill came and went with it would be a different shape every frame.
 
 - **Gradients, masks and filters are ignored.** Only flat `fill` and `stroke` paint is read,
   from either presentation attributes or an inline `style=`.
-- **Fill applies to closed subpaths only.** Line-art SVGs are open paths and will stroke but
-  not fill, which is correct — there is no inside to fill.
+- **Fill is decided by paint, not by `Z`.** An SVG fill implicitly closes its subpath whether
+  or not the path data closes it, so an import fills on the `fill` attribute alone. Gating that
+  on `Z` cost an Inkscape cat its nose — one filled subpath among six stroked ones, written
+  without a closing `Z` because filling it never needed one. The `closed` flag still gates
+  **hand-drawn** strokes, where it is the user's own toggle and the label says so.
 - **Text must be converted to outlines first.** There is no font rasterizer here.
 - Imported paths are not editable point-by-point in the overlay. Use Transform, or edit the
   path data string by hand.
