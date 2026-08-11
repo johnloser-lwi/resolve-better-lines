@@ -1189,20 +1189,30 @@ int main(int argc, char** argv)
             BlobToStrokes(blob, back);
             std::printf("  blob=%zu bytes, %zu subpaths after round-trip\n",
                         blob.size(), back.size());
+            for (size_t k = 0; k < back.size(); ++k)
+            {
+                const StrokePaint& q = back[k].paint;
+                std::printf("    [%2zu] %-6s pts=%3zu  fill=%s(%.2f,%.2f,%.2f)  "
+                            "stroke=%s(%.2f,%.2f,%.2f) w=%.5f\n",
+                            k, back[k].closed ? "closed" : "open", back[k].pts.size(),
+                            q.hasFill ? "Y" : "n", q.fillColor.r, q.fillColor.g, q.fillColor.b,
+                            q.hasStroke ? "Y" : "n", q.strokeColor.r, q.strokeColor.g,
+                            q.strokeColor.b, q.width);
+            }
 
             const int size = cell;
             std::vector<float> rgba(static_cast<size_t>(size) * size * 4, 0.0f);
 
-            Style st;
-            st.halfWidth = (strokePx >= 0.0f) ? strokePx * 0.5f : size / 300.0f;
-            st.feather   = 1.2f;
-            st.color     = Color(1.0f, 0.9f, 0.5f, 1.0f);
-            st.fill      = wantFill;
-            st.fillColor = Color(0.25f, 0.55f, 0.9f, 1.0f);
-            st.fillOpacity = 0.85f;
+            Style base;
+            base.feather   = 1.2f;
+            base.color     = Color(1.0f, 0.9f, 0.5f, 1.0f);
+            base.fillColor = Color(0.25f, 0.55f, 0.9f, 1.0f);
+            base.fillOpacity = 1.0f;
 
             std::vector<Segment>  segs;
             std::vector<FillEdge> fill;
+            std::vector<Style>    styles;
+            styles.push_back(base);
             TrimState trim;
 
             const Xform2D xf = MakeXform(
@@ -1215,27 +1225,56 @@ int main(int argc, char** argv)
                 for (ControlPoint& p : s.pts)
                 {
                     // Same square mapping the plugin uses, on a square cell.
-                    p.pos = BlobToPixels(p.pos, 0.0f, 0.0f,
-                                         static_cast<float>(size), static_cast<float>(size));
-                    p.tan = BlobVectorToPixels(p.tan, static_cast<float>(size));
+                    p.pos   = BlobToPixels(p.pos, 0.0f, 0.0f,
+                                           static_cast<float>(size), static_cast<float>(size));
+                    p.tan   = BlobVectorToPixels(p.tan, static_cast<float>(size));
+                    p.tanIn = BlobVectorToPixels(p.tanIn, static_cast<float>(size));
 
                     if (!xf.IsIdentity())
                     {
-                        p.pos = xf.Apply(p.pos);
-                        p.tan = xf.ApplyVector(p.tan);
+                        p.pos   = xf.Apply(p.pos);
+                        p.tan   = xf.ApplyVector(p.tan);
+                        p.tanIn = xf.ApplyVector(p.tanIn);
                     }
                 }
 
+                // The same composition the plugin does: each path's own paint,
+                // with the harness flags standing in for the Use Imported
+                // toggles.
+                Style st = base;
+                st.fill = wantFill && s.paint.hasFill;
+                if (s.paint.hasFill)   st.fillColor = s.paint.fillColor;
+                if (s.paint.hasStroke) st.color     = s.paint.strokeColor;
+
+                if (strokePx >= 0.0f)      st.halfWidth = strokePx * 0.5f;
+                else if (s.paint.hasStroke) st.halfWidth = s.paint.width * size * 0.5f;
+                else                        st.halfWidth = 0.0f;
+
+                // Same grouping rule as the plugin: contours of one element
+                // share a style entry so their windings combine.
+                int styleIdx;
+                if (k > 0 && back[k].paint.group == back[k - 1].paint.group)
+                    styleIdx = static_cast<int>(styles.size()) - 1;
+                else
+                { styleIdx = static_cast<int>(styles.size()); styles.push_back(st); }
+
                 Polyline poly;
                 FlattenStroke(s, 0.2f, poly);
-                if (st.fill && s.closed) AppendFillContour(poly.pts, 0, fill);
+                if (st.fill && s.closed) AppendFillContour(poly.pts, styleIdx, fill);
+
+                const size_t firstSeg = segs.size();
                 BuildStrokeSegments(poly, st, trim, s.closed, 0.0f, 0.0f, 0.0f, segs);
+                for (size_t q = firstSeg; q < segs.size(); ++q) segs[q].style = styleIdx;
             }
 
+            float reach = 0.0f, feather = 0.0f;
+            for (const Style& s2 : styles)
+            { reach = std::max(reach, s2.MaxReach()); feather = std::max(feather, s2.feather); }
+
             TileGrid grid;
-            BuildTileGrid(segs, st.MaxReach() + 1.0f, 0, 0, size, size, 16, grid);
+            BuildTileGrid(segs, reach + 1.0f, 0, 0, size, size, 16, grid);
             BandGrid bands;
-            BuildBandGrid(fill, st.feather + 1.0f, 0, size, 16, bands);
+            BuildBandGrid(fill, feather + 1.0f, 0, size, 16, bands);
 
             SceneView scene;
             scene.segs = segs.empty() ? nullptr : segs.data();
@@ -1244,8 +1283,8 @@ int main(int argc, char** argv)
             scene.fill = fill.empty() ? nullptr : fill.data();
             scene.fillCount = static_cast<int>(fill.size());
             scene.bands = bands.View();
-            scene.styles = &st;
-            scene.styleCount = 1;
+            scene.styles = styles.data();
+            scene.styleCount = static_cast<int>(styles.size());
 
             ShadeRect(scene, rgba.data(), size * 4, 0, 0, size, size);
             std::printf("  segments=%zu fillEdges=%zu\n", segs.size(), fill.size());

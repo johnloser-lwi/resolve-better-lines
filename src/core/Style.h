@@ -45,6 +45,15 @@ struct StrokePaint
     /// Stroke width in the same normalised units as the points, so it survives
     /// a change of resolution exactly as the geometry does.
     float width = 0.0f;
+
+    /// Which drawn SHAPE this contour belongs to.
+    ///
+    /// A single SVG <path> often holds several subpaths that are one shape: an
+    /// outer contour and an inner one making a ring, or a letter and its
+    /// counter. Their windings have to be combined, or the inner contour stops
+    /// cutting a hole and the outer one fills solid -- hiding everything the
+    /// hole was there to reveal.
+    int group = 0;
 };
 
 enum CapStyle { kCapRound = 0, kCapButt = 1, kCapSquare = 2 };

@@ -90,6 +90,9 @@ constexpr const char* kParamClearImport = "clearImport";
 constexpr const char* kParamPathBlob    = "pathData";
 constexpr const char* kParamImportInfo  = "importInfo";
 constexpr const char* kParamImportShow  = "importEnabled";
+constexpr const char* kParamImportCol   = "importUseColours";
+constexpr const char* kParamImportWid   = "importUseWidths";
+constexpr const char* kParamImportScale = "importWidthScale";
 
 // --- global transform --------------------------------------------------------
 constexpr const char* kParamXfPos    = "xformPosition";

@@ -53,11 +53,19 @@ BL_HD inline Vec2 BlobVectorToPixels(Vec2 v, float h)
     return Vec2(v.x * h, v.y * h);
 }
 
-/** @brief Serialise strokes to the blob format. */
+/** @brief Serialise strokes to the blob format.
+ *
+ * v2 adds a paint block per subpath: `<kind>:<paint>:<points>`. v1 files, which
+ * have no paint block, still load -- an import someone already made keeps
+ * working and simply uses the global style, which is what it did anyway.
+ */
 inline std::string StrokesToBlob(const std::vector<Stroke>& strokes)
 {
-    std::string out = "v1";
-    char buf[128];
+    // v3 stores SIX numbers per point: position, outgoing handle, incoming
+    // handle. Imported artwork routinely has asymmetric handles, and storing one
+    // and mirroring it bends every span whose two ends disagree.
+    std::string out = "v3";
+    char buf[256];
 
     for (const Stroke& s : strokes)
     {
@@ -67,6 +75,15 @@ inline std::string StrokesToBlob(const std::vector<Stroke>& strokes)
         out += s.closed ? 'C' : 'O';
         out += ':';
 
+        const StrokePaint& k = s.paint;
+        const int flags = (k.hasStroke ? 1 : 0) | (k.hasFill ? 2 : 0);
+        std::snprintf(buf, sizeof(buf),
+                      "%.4g,%.4g,%.4g,%.4g,%.4g,%.4g,%.4g,%.4g,%.6g,%d,%d:",
+                      k.strokeColor.r, k.strokeColor.g, k.strokeColor.b, k.strokeColor.a,
+                      k.fillColor.r, k.fillColor.g, k.fillColor.b, k.fillColor.a,
+                      k.width, flags, k.group);
+        out += buf;
+
         bool first = true;
         for (const ControlPoint& p : s.pts)
         {
@@ -74,8 +91,9 @@ inline std::string StrokesToBlob(const std::vector<Stroke>& strokes)
             first = false;
             // Six significant digits: one part in a million of the frame is far
             // finer than a pixel at 8K, and the file stays readable.
-            std::snprintf(buf, sizeof(buf), "%.6g,%.6g,%.6g,%.6g",
-                          p.pos.x, p.pos.y, p.tan.x, p.tan.y);
+            const Vec2 in = p.hasIn ? p.tanIn : Vec2(-p.tan.x, -p.tan.y);
+            std::snprintf(buf, sizeof(buf), "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g",
+                          p.pos.x, p.pos.y, p.tan.x, p.tan.y, in.x, in.y);
             out += buf;
         }
     }
@@ -92,9 +110,12 @@ inline void BlobToStrokes(const std::string& blob, std::vector<Stroke>& out)
     out.clear();
     if (blob.size() < 2) return;
 
+    // The version decides whether a paint block precedes the points. Telling the
+    // two apart by counting colons would work until a malformed string arrived.
+    const int version = (blob.compare(0, 2, "v3") == 0) ? 3
+                      : (blob.compare(0, 2, "v2") == 0) ? 2 : 1;
+
     size_t i = 0;
-    // Skip the version tag. Nothing keys off it yet; it exists so a future
-    // format change can be told apart from a corrupt string.
     while (i < blob.size() && blob[i] != ';') ++i;
 
     while (i < blob.size())
@@ -111,14 +132,44 @@ inline void BlobToStrokes(const std::string& blob, std::vector<Stroke>& out)
         Stroke s;
         s.closed = (kind == 'C');
 
+        if (version >= 2)
+        {
+            double k[11] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0};
+            int got = 0;
+            for (; got < 11 && i < blob.size() && blob[i] != ';'; ++got)
+            {
+                const char* start = blob.c_str() + i;
+                char* end = nullptr;
+                k[got] = std::strtod(start, &end);
+                if (end == start) break;
+                i += static_cast<size_t>(end - start);
+                if (i < blob.size() && (blob[i] == ',' || blob[i] == ':')) ++i;
+            }
+
+            if (got >= 10)
+            {
+                s.paint.strokeColor = Color(static_cast<float>(k[0]), static_cast<float>(k[1]),
+                                            static_cast<float>(k[2]), static_cast<float>(k[3]));
+                s.paint.fillColor   = Color(static_cast<float>(k[4]), static_cast<float>(k[5]),
+                                            static_cast<float>(k[6]), static_cast<float>(k[7]));
+                s.paint.width     = static_cast<float>(k[8]);
+                const int flags   = static_cast<int>(k[9]);
+                s.paint.hasStroke = (flags & 1) != 0;
+                s.paint.hasFill   = (flags & 2) != 0;
+                s.paint.group     = static_cast<int>(k[10]);
+            }
+        }
+
         while (i < blob.size() && blob[i] != ';')
         {
             while (i < blob.size() && blob[i] == ' ') ++i;
             if (i >= blob.size() || blob[i] == ';') break;
 
-            double v[4] = {0, 0, 0, 0};
+            const int want = (version >= 3) ? 6 : 4;
+
+            double v[6] = {0, 0, 0, 0, 0, 0};
             int got = 0;
-            for (; got < 4; ++got)
+            for (; got < want; ++got)
             {
                 const char* start = blob.c_str() + i;
                 char* end = nullptr;
@@ -128,11 +179,16 @@ inline void BlobToStrokes(const std::string& blob, std::vector<Stroke>& out)
                 if (i < blob.size() && blob[i] == ',') ++i;
                 else { ++got; break; }
             }
-            if (got < 4) break;               // a truncated point ends the subpath
+            if (got < want) break;            // a truncated point ends the subpath
 
             ControlPoint cp;
             cp.pos = Vec2(static_cast<float>(v[0]), static_cast<float>(v[1]));
             cp.tan = Vec2(static_cast<float>(v[2]), static_cast<float>(v[3]));
+            if (version >= 3)
+            {
+                cp.tanIn = Vec2(static_cast<float>(v[4]), static_cast<float>(v[5]));
+                cp.hasIn = true;
+            }
             s.pts.push_back(cp);
         }
 

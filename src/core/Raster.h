@@ -131,21 +131,61 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
             const int flo = scene.bands.start[band];
             const int fhi = scene.bands.start[band + 1];
 
-            int   wn = 0;
+            // Resolved PER SHAPE, topmost first -- not as one winding over every
+            // contour in the frame.
+            //
+            // A single global winding answers "is this pixel inside any filled
+            // shape", which is the wrong question the moment two shapes have
+            // different colours: the colour then has to come from the nearest
+            // edge, and deep inside one shape the nearest edge often belongs to
+            // another. Imported artwork came out banded with slabs of the wrong
+            // colour wherever that happened.
+            //
+            // No per-shape storage is needed because the band's edges are
+            // already grouped by style: fill contours are appended one stroke at
+            // a time, and the binning preserves that order. So one walk finds
+            // the last -- topmost -- group whose winding is non-zero.
             float fd = 1e30f;
-            for (int i = flo; i < fhi; ++i)
+            int   nearLo = -1, nearHi = -1;
+            int   bestLo = -1, bestHi = -1;
+
+            int i = flo;
+            while (i < fhi)
             {
-                const int idx = scene.bands.items[i];
-                if (idx < 0 || idx >= scene.fillCount) continue;
+                const int firstIdx = scene.bands.items[i];
+                if (firstIdx < 0 || firstIdx >= scene.fillCount) { ++i; continue; }
+                const int groupStyle = scene.fill[firstIdx].style;
 
-                const FillEdge& e = scene.fill[idx];
-                wn += WindingContribution(p, e.a, e.b);
+                int   wn = 0;
+                int   j  = i;
+                for (; j < fhi; ++j)
+                {
+                    const int idx = scene.bands.items[j];
+                    if (idx < 0 || idx >= scene.fillCount) continue;
 
-                const float ed = DistanceToLine(p, e.a, e.b);
-                if (ed < fd) { fd = ed; fillStyleIdx = e.style; }
+                    const FillEdge& e = scene.fill[idx];
+                    if (e.style != groupStyle) break;
+
+                    wn += WindingContribution(p, e.a, e.b);
+
+                    const float ed = DistanceToLine(p, e.a, e.b);
+                    if (ed < fd) { fd = ed; fillStyleIdx = e.style; nearLo = i; nearHi = -1; }
+                }
+                if (nearHi < 0 && nearLo == i) nearHi = j;
+
+                if (wn != 0) { bestLo = i; bestHi = j; fillStyleIdx = groupStyle; }
+                i = j;
             }
 
-            if (fd < 1e29f && scene.StyleAt(fillStyleIdx).fill)
+            // Outside every shape but close to one: that group still owns the
+            // antialiased edge.
+            if (bestLo < 0 && fd <= 1.0f && nearLo >= 0) { bestLo = nearLo; bestHi = nearHi; }
+
+            const int flo2 = (bestLo >= 0) ? bestLo : flo;
+            const int fhi2 = (bestHi >= 0) ? bestHi : fhi;
+            const int wn   = (bestLo >= 0 && bestHi >= 0) ? 1 : 0;
+
+            if (bestLo >= 0 && scene.StyleAt(fillStyleIdx).fill)
             {
                 // Away from any contour, the winding IS the answer and no
                 // softening is wanted.
@@ -162,6 +202,8 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
                 }
                 else
                 {
+                    // Supersampled over the WINNING group only, so a neighbouring
+                    // shape's contour cannot eat into this one's edge.
                     // Near a contour, sample the winding across the pixel and
                     // take the area it covers. This is exact about which side of
                     // the union each sample is on, so an interior boundary
@@ -173,9 +215,9 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
                         const Vec2 q(px - 0.5f + (static_cast<float>(sx) + 0.5f) * 0.25f,
                                      py - 0.5f + (static_cast<float>(sy) + 0.5f) * 0.25f);
                         int w2 = 0;
-                        for (int i = flo; i < fhi; ++i)
+                        for (int k = flo2; k < fhi2; ++k)
                         {
-                            const int idx = scene.bands.items[i];
+                            const int idx = scene.bands.items[k];
                             if (idx < 0 || idx >= scene.fillCount) continue;
                             const FillEdge& e = scene.fill[idx];
                             w2 += WindingContribution(q, e.a, e.b);

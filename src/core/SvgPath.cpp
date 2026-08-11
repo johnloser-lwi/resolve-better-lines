@@ -187,16 +187,13 @@ void ArcToBeziers(Vec2 p0, Vec2 p1, float rx, float ry, float xRotDeg,
         if (!out.empty()) out.back().tan = dStart * t;
 
         ControlPoint cp;
-        cp.pos = pEnd;
-        cp.tan = Vec2(0, 0);
+        cp.pos   = pEnd;
+        cp.tanIn = Vec2(-dEnd.x * t, -dEnd.y * t);
+        cp.hasIn = true;
+        // An arc segment is smooth through its own end, so the outgoing handle
+        // continues the incoming one; a following span overwrites it if not.
+        cp.tan   = dEnd * t;
         out.push_back(cp);
-
-        // A cubic's second control point is the endpoint minus its handle, and
-        // this format stores one SYMMETRIC handle per point -- so an arc's
-        // incoming handle is recorded as the outgoing one of the same length,
-        // which is exact here because an arc segment is symmetric about its
-        // midpoint.
-        out.back().tan = dEnd * t;
 
         th = th2;
         (void)pStart;
@@ -218,11 +215,16 @@ void ArcToBeziers(Vec2 p0, Vec2 p1, float rx, float ry, float xRotDeg,
  *  is smooth, and the closest available answer when it is not. */
 void EmitCubic(std::vector<ControlPoint>& pts, Vec2 c1, Vec2 c2, Vec2 end)
 {
+    // The two controls are recorded in DIFFERENT fields of different points, so
+    // the next span -- which writes this point's outgoing handle -- cannot
+    // overwrite the incoming one just stored here.
     if (!pts.empty()) pts.back().tan = c1 - pts.back().pos;
 
     ControlPoint cp;
-    cp.pos = end;
-    cp.tan = end - c2;   // mirrored: the stored handle is the OUTGOING one
+    cp.pos   = end;
+    cp.tanIn = c2 - end;
+    cp.hasIn = true;
+    cp.tan   = end - c2;   // a smooth continuation until a later span says otherwise
     pts.push_back(cp);
 }
 
@@ -429,6 +431,154 @@ std::string AttrOf(const std::string& tag, const char* name)
     return tag.substr(p + 1, end - p - 1);
 }
 
+// =============================================================================
+// Paint
+// =============================================================================
+
+/** SVG's own defaults, which are NOT "nothing": an element with no paint
+ *  attributes at all is filled black and has no stroke. Starting from empty
+ *  would make every unstyled shape invisible. */
+struct SvgPaint
+{
+    bool  hasFill   = true;
+    bool  hasStroke = false;
+    Color fill      = Color(0.0f, 0.0f, 0.0f, 1.0f);
+    Color stroke    = Color(0.0f, 0.0f, 0.0f, 1.0f);
+    float width     = 1.0f;
+};
+
+/** @brief One property, from the element's own attribute or its `style`.
+ *
+ * Both spellings have to be read. Inkscape writes `style="fill:none;stroke:#000"`
+ * while most other exporters write separate attributes, and a file using the
+ * form we ignore looks completely unstyled -- which is how an earlier check
+ * concluded a stroked file had no strokes.
+ */
+std::string PaintProp(const std::string& tag, const std::string& style, const char* name)
+{
+    // The style attribute wins, as CSS says it does.
+    if (!style.empty())
+    {
+        size_t p = 0;
+        const std::string key(name);
+        while ((p = style.find(key, p)) != std::string::npos)
+        {
+            const bool startOk = (p == 0 || style[p - 1] == ';' || IsWs(style[p - 1]));
+            size_t q = p + key.size();
+            while (q < style.size() && IsWs(style[q])) ++q;
+            if (startOk && q < style.size() && style[q] == ':')
+            {
+                ++q;
+                while (q < style.size() && IsWs(style[q])) ++q;
+                const size_t end = style.find(';', q);
+                return style.substr(q, (end == std::string::npos ? style.size() : end) - q);
+            }
+            p += key.size();
+        }
+    }
+    return AttrOf(tag, name);
+}
+
+bool ParseColour(const std::string& v, Color& out)
+{
+    if (v.empty() || v == "none" || v == "transparent") return false;
+
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
+    if (v[0] == '#')
+    {
+        const std::string h = v.substr(1);
+        if (h.size() >= 6)
+        {
+            const int r = hex(h[0]) * 16 + hex(h[1]);
+            const int g = hex(h[2]) * 16 + hex(h[3]);
+            const int b = hex(h[4]) * 16 + hex(h[5]);
+            if (r < 0 || g < 0 || b < 0) return false;
+            out = Color(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+            return true;
+        }
+        if (h.size() >= 3)
+        {
+            // #abc means #aabbcc, not #0a0b0c.
+            const int r = hex(h[0]), g = hex(h[1]), b = hex(h[2]);
+            if (r < 0 || g < 0 || b < 0) return false;
+            out = Color(r * 17 / 255.0f, g * 17 / 255.0f, b * 17 / 255.0f, 1.0f);
+            return true;
+        }
+        return false;
+    }
+
+    if (v.compare(0, 4, "rgb(") == 0)
+    {
+        size_t j = 4;
+        float c[3] = {0, 0, 0};
+        for (int k = 0; k < 3; ++k) if (!ReadNum(v, j, c[k])) return false;
+        // rgb() takes 0-255 or percentages; the percent form is rare enough to
+        // detect by the marker rather than parsed separately.
+        const float s = (v.find('%') != std::string::npos) ? 0.01f : (1.0f / 255.0f);
+        out = Color(c[0] * s, c[1] * s, c[2] * s, 1.0f);
+        return true;
+    }
+
+    // A short list of names, which is what icon exporters actually emit.
+    struct Named { const char* n; float r, g, b; };
+    static const Named names[] = {
+        {"black",0,0,0}, {"white",1,1,1}, {"red",1,0,0}, {"lime",0,1,0}, {"blue",0,0,1},
+        {"yellow",1,1,0}, {"cyan",0,1,1}, {"aqua",0,1,1}, {"magenta",1,0,1}, {"fuchsia",1,0,1},
+        {"gray",0.5f,0.5f,0.5f}, {"grey",0.5f,0.5f,0.5f}, {"silver",0.75f,0.75f,0.75f},
+        {"maroon",0.5f,0,0}, {"green",0,0.5f,0}, {"navy",0,0,0.5f}, {"olive",0.5f,0.5f,0},
+        {"purple",0.5f,0,0.5f}, {"teal",0,0.5f,0.5f}, {"orange",1.0f,0.647f,0},
+    };
+    for (const Named& n : names)
+        if (v == n.n) { out = Color(n.r, n.g, n.b, 1.0f); return true; }
+
+    return false;
+}
+
+/** @brief Resolve an element's paint against its inherited parent paint. */
+SvgPaint ResolvePaint(const std::string& tag, const SvgPaint& parent)
+{
+    SvgPaint p = parent;
+    const std::string style = AttrOf(tag, "style");
+
+    auto opacityOf = [&](const char* name, float def) {
+        const std::string v = PaintProp(tag, style, name);
+        if (v.empty()) return def;
+        size_t j = 0; float f = def; ReadNum(v, j, f); return f;
+    };
+
+    const std::string f = PaintProp(tag, style, "fill");
+    if (!f.empty())
+    {
+        Color c;
+        if (ParseColour(f, c)) { p.fill = c; p.hasFill = true; }
+        else                   { p.hasFill = false; }   // "none"
+    }
+
+    const std::string s = PaintProp(tag, style, "stroke");
+    if (!s.empty())
+    {
+        Color c;
+        if (ParseColour(s, c)) { p.stroke = c; p.hasStroke = true; }
+        else                   { p.hasStroke = false; }
+    }
+
+    const std::string w = PaintProp(tag, style, "stroke-width");
+    if (!w.empty()) { size_t j = 0; ReadNum(w, j, p.width); }
+
+    // Group opacity multiplies through, which is how a faded <g> is authored.
+    const float groupA = opacityOf("opacity", 1.0f);
+    p.fill.a   = Clamp(opacityOf("fill-opacity", 1.0f)   * groupA, 0.0f, 1.0f);
+    p.stroke.a = Clamp(opacityOf("stroke-opacity", 1.0f) * groupA, 0.0f, 1.0f);
+
+    return p;
+}
+
 Mat ParseTransform(const std::string& spec)
 {
     Mat m;
@@ -565,6 +715,11 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
     std::vector<Mat> stack;
     stack.push_back(Mat());
 
+    // Paint inherits down the tree exactly as transforms do, so it needs the
+    // same stack: a <g fill="#333"> sets the fill for everything inside it.
+    std::vector<SvgPaint> paints;
+    paints.push_back(SvgPaint());
+
     /** Elements whose contents are DEFINITIONS, not drawn content.
      *
      * Skipping these is not a refinement, it is required. A clip path, a mask or
@@ -580,6 +735,7 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
 
     std::vector<Stroke> user;   // in SVG user units
     bool sawArc = false;
+    int  elementIndex = 0;      // one per drawn element, in document order
 
     size_t i = 0;
     while (i < svg.size())
@@ -601,7 +757,11 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
             while (k < tag.size() && (std::isalnum(static_cast<unsigned char>(tag[k])) || tag[k] == '-')) ++k;
             const std::string closing = tag.substr(2, k - 2);
 
-            if (closing == "g" && stack.size() > 1) stack.pop_back();
+            if (closing == "g" && stack.size() > 1)
+            {
+                stack.pop_back();
+                if (paints.size() > 1) paints.pop_back();
+            }
             if (isDefinition(closing) && defsDepth > 0) --defsDepth;
             continue;
         }
@@ -626,7 +786,11 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
         {
             // A self-closing <g/> opens nothing, so pushing for it would leave
             // the stack permanently deeper and shift everything after it.
-            if (!selfClosing) stack.push_back(local.Then(stack.back()));
+            if (!selfClosing)
+            {
+                stack.push_back(local.Then(stack.back()));
+                paints.push_back(ResolvePaint(tag, paints.back()));
+            }
             continue;
         }
 
@@ -641,18 +805,39 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
         std::vector<Stroke> got;
         if (!ParsePathData(d, got, sawArc, maxPoints - r.points)) continue;
 
-        const Mat m = local.Then(stack.back());
+        const Mat      m  = local.Then(stack.back());
+        const SvgPaint pp = ResolvePaint(tag, paints.back());
+
+        // Stroke width is in user units and the element may be inside a scaled
+        // group, so it has to travel through the same transform the geometry
+        // does. sqrt(|det|) is the uniform part of that scale -- the honest
+        // single number for a width under a possibly non-uniform transform.
+        const float det   = ::fabsf(m.a * m.d - m.b * m.c);
+        const float mscale = (det > 1e-12f) ? ::sqrtf(det) : 1.0f;
+
         for (Stroke& s : got)
         {
             for (ControlPoint& p : s.pts)
             {
-                p.pos = m.Apply(p.pos);
-                p.tan = m.ApplyVector(p.tan);
+                p.pos   = m.Apply(p.pos);
+                p.tan   = m.ApplyVector(p.tan);
+                p.tanIn = m.ApplyVector(p.tanIn);
             }
+            s.paint.hasFill     = pp.hasFill;
+            s.paint.hasStroke   = pp.hasStroke;
+            s.paint.fillColor   = pp.fill;
+            s.paint.strokeColor = pp.stroke;
+            s.paint.width       = pp.width * mscale;   // still user units here
+
+            // Every subpath of THIS element shares one group, so their windings
+            // combine and an inner contour keeps cutting its hole.
+            s.paint.group = elementIndex;
+
             r.points += static_cast<int>(s.pts.size());
             user.push_back(s);
         }
 
+        ++elementIndex;
         if (r.points >= maxPoints) { r.truncated = true; break; }
     }
 
@@ -682,10 +867,14 @@ SvgImportResult ParseSvg(const std::string& svg, int maxPoints)
     {
         for (ControlPoint& p : s.pts)
         {
-            p.pos = Vec2(0.5f + (p.pos.x - cx) * scale,
-                         0.5f - (p.pos.y - cy) * scale);
-            p.tan = Vec2(p.tan.x * scale, -p.tan.y * scale);
+            p.pos   = Vec2(0.5f + (p.pos.x - cx) * scale,
+                           0.5f - (p.pos.y - cy) * scale);
+            p.tan   = Vec2(p.tan.x * scale, -p.tan.y * scale);
+            p.tanIn = Vec2(p.tanIn.x * scale, -p.tanIn.y * scale);
         }
+        // The same factor the geometry took, so a stroke keeps its weight
+        // relative to the artwork at any output resolution.
+        s.paint.width *= scale;
         r.strokes.push_back(s);
     }
 

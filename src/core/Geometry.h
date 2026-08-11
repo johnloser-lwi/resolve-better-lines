@@ -25,7 +25,21 @@ namespace bl {
 struct ControlPoint
 {
     Vec2 pos;
-    Vec2 tan;   ///< outgoing handle offset; zero makes a corner
+    Vec2 tan;     ///< OUTGOING handle, as an offset from pos. Zero makes a corner.
+
+    /// INCOMING handle, as an offset from pos. Mirrors @c tan unless set.
+    ///
+    /// Hand-drawn points are symmetric on purpose -- that is what halves their
+    /// parameter cost -- but imported artwork is not. A bezier span gives each
+    /// end its own control, and with one shared field per point the second span
+    /// to touch a point overwrites what the first stored: the incoming handle
+    /// is replaced by the outgoing one, and wherever the two genuinely differ
+    /// the previous span is bent into a visible twist.
+    Vec2 tanIn;
+    bool hasIn = false;
+
+    /// Where the incoming control actually sits, mirroring when none was given.
+    Vec2 InControl() const { return hasIn ? pos + tanIn : pos - tan; }
 };
 
 /** @brief A path: an ordered run of control points, optionally closed. */
@@ -230,7 +244,7 @@ inline void FlattenStroke(const Stroke& stroke, float tol, Polyline& out)
 
         const Vec2 p0 = c0.pos;
         const Vec2 p1 = c0.pos + c0.tan;
-        const Vec2 p2 = c1.pos - c1.tan;   // mirrored incoming handle
+        const Vec2 p2 = c1.InControl();    // its own incoming handle, or the mirror
         const Vec2 p3 = c1.pos;
 
         push(p0);

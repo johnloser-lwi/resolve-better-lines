@@ -329,9 +329,12 @@ private:
     // --- imported paths ------------------------------------------------------
     void importSvg();
 
-    OFX::BooleanParam* _importShow = nullptr;
-    OFX::StringParam*  _pathBlob   = nullptr;
-    OFX::StringParam*  _importInfo = nullptr;
+    OFX::BooleanParam* _importShow  = nullptr;
+    OFX::BooleanParam* _importCol   = nullptr;
+    OFX::BooleanParam* _importWid   = nullptr;
+    OFX::DoubleParam*  _importScale = nullptr;
+    OFX::StringParam*  _pathBlob    = nullptr;
+    OFX::StringParam*  _importInfo  = nullptr;
 
     /// Parsed blob, kept until the string changes.
     ///
@@ -483,9 +486,12 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
         _stOver[i]     = fetchDoubleParam(StageParam(kStageOver, out));
     }
 
-    _importShow = fetchBooleanParam(kParamImportShow);
-    _pathBlob   = fetchStringParam(kParamPathBlob);
-    _importInfo = fetchStringParam(kParamImportInfo);
+    _importShow  = fetchBooleanParam(kParamImportShow);
+    _importCol   = fetchBooleanParam(kParamImportCol);
+    _importWid   = fetchBooleanParam(kParamImportWid);
+    _importScale = fetchDoubleParam(kParamImportScale);
+    _pathBlob    = fetchStringParam(kParamPathBlob);
+    _importInfo  = fetchStringParam(kParamImportInfo);
 
     _presetName   = fetchStringParam(kParamPresetName);
     _presetFolder = fetchStringParam(kParamPresetFolder);
@@ -1196,6 +1202,10 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
     const int importedCount = imported ? static_cast<int>(imported->size()) : 0;
     const int totalStrokes  = strokes + importedCount;
 
+    const bool  useImportCol = BoolAt(_importCol, t);
+    const bool  useImportWid = BoolAt(_importWid, t);
+    const float importScale  = static_cast<float>(DoubleAt(_importScale, t));
+
     Polyline poly;
     for (int s = 0; s < totalStrokes; ++s)
     {
@@ -1220,12 +1230,15 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
                 cp.pos = BlobToPixels(in.pos, static_cast<float>(rod.x1),
                                       static_cast<float>(rod.y1),
                                       static_cast<float>(w), static_cast<float>(h));
-                cp.tan = BlobVectorToPixels(in.tan, static_cast<float>(h));
+                cp.tan   = BlobVectorToPixels(in.tan, static_cast<float>(h));
+                cp.tanIn = BlobVectorToPixels(in.tanIn, static_cast<float>(h));
+                cp.hasIn = in.hasIn;
 
                 if (!xf.IsIdentity())
                 {
-                    cp.pos = xf.Apply(cp.pos);
-                    cp.tan = xf.ApplyVector(cp.tan);
+                    cp.pos   = xf.Apply(cp.pos);
+                    cp.tan   = xf.ApplyVector(cp.tan);
+                    cp.tanIn = xf.ApplyVector(cp.tanIn);
                 }
                 stroke.pts.push_back(cp);
             }
@@ -1289,9 +1302,36 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
         Style     st   = style;
         TrimState trim = baseTrim;
         float     dashPhasePx = baseDashPct * static_cast<float>(pctToPx);
+        float     thickPct    = baseThickPct;
+
+        // An imported path carries the paint it was drawn with. Applied BEFORE
+        // the animation stages, so a stage driving Thickness or Opacity still
+        // acts on what the artwork asked for rather than replacing it.
+        if (isImported)
+        {
+            const StrokePaint& k = (*imported)[static_cast<size_t>(s - strokes)].paint;
+
+            if (useImportCol)
+            {
+                if (k.hasStroke) st.color     = k.strokeColor;
+                if (k.hasFill)   st.fillColor = k.fillColor;
+            }
+
+            // A path the artwork never stroked must not gain one, and a path it
+            // never filled must not gain a fill -- that is the whole difference
+            // between a logo and a silhouette.
+            st.fill = k.hasFill && (style.fill || k.hasFill);
+            if (!k.hasStroke) thickPct = 0.0f;
+            else if (useImportWid)
+            {
+                // Blob width is a fraction of the frame HEIGHT, and Thickness is
+                // a percentage of it, so the conversion is a factor of 100.
+                thickPct = k.width * 100.0f * importScale;
+            }
+        }
 
         AnimTargets av;
-        SeedTargets(st, trim, baseThickPct, baseDashPct, av);
+        SeedTargets(st, trim, thickPct, baseDashPct, av);
 
         if (animOn)
         {
@@ -1306,8 +1346,20 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
 
         WriteTargets(av, static_cast<float>(pctToPx), st, trim, dashPhasePx);
 
-        const int styleIdx = static_cast<int>(styles.size());
-        styles.push_back(st);
+        // Contours from the same imported element share one style entry, so the
+        // fill pass treats them as one shape and their windings combine.
+        int styleIdx;
+        if (isImported && s > strokes &&
+            (*imported)[static_cast<size_t>(s - strokes)].paint.group ==
+            (*imported)[static_cast<size_t>(s - strokes - 1)].paint.group)
+        {
+            styleIdx = static_cast<int>(styles.size()) - 1;
+        }
+        else
+        {
+            styleIdx = static_cast<int>(styles.size());
+            styles.push_back(st);
+        }
 
         // Fill takes the WHOLE contour, before trim and dashes touch it. A trim
         // is a reveal of the line; a shape whose fill came and went with it would
@@ -1800,6 +1852,21 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         DefineBool(p_Desc, page, g, kParamImportShow, "Show Imported Path",
                    "Draw the imported geometry. Turn off to work on the hand-drawn "
                    "strokes without deleting the import.", true);
+
+        // Escapes back to the global style. Without these, importing artwork
+        // that carries its own colour would silently disconnect the Colour and
+        // Thickness controls from it, and "why can't I recolour my logo" is a
+        // worse problem than the silhouette this replaces.
+        DefineBool(p_Desc, page, g, kParamImportCol, "Use Imported Colours",
+                   "On, each imported path keeps the colour it was drawn with. Off, the "
+                   "whole import takes the global Colour.", true);
+        DefineBool(p_Desc, page, g, kParamImportWid, "Use Imported Widths",
+                   "On, each imported path keeps the stroke width it was drawn with. "
+                   "Off, the whole import takes the global Thickness.", true);
+        DefineDouble(p_Desc, page, g, kParamImportScale, "Imported Width Scale",
+                     "Multiplies every imported stroke width, so a logo can be made "
+                     "heavier or finer without losing its relative line weights.",
+                     1.0, 0.0, 100.0, 0.0, 4.0);
 
         {
             OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamImportSvg);
