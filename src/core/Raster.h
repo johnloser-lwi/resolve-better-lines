@@ -145,16 +145,45 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
                 if (ed < fd) { fd = ed; fillStyleIdx = e.style; }
             }
 
-            // Winding gives inside/outside; distance to the contour gives the
-            // soft edge. Combined into a signed distance, the fill boundary
-            // antialiases through the same smoothstep the stroke uses, so the
-            // two edges match instead of one looking crisper than the other.
-            if (fd < 1e29f)
+            if (fd < 1e29f && scene.StyleAt(fillStyleIdx).fill)
             {
-                const Style& fs = scene.StyleAt(fillStyleIdx);
-                if (fs.fill)
-                    fillCov = 1.0f - SmoothStep(-fs.feather * 0.5f, fs.feather * 0.5f,
-                                                (wn != 0) ? -fd : fd);
+                // Away from any contour, the winding IS the answer and no
+                // softening is wanted.
+                //
+                // Softening by distance everywhere is what produced seams
+                // wherever two filled shapes abut: the boundary between them is
+                // interior to the union, the winding is non-zero on both sides,
+                // and yet every pixel within a feather of it was being faded.
+                // Artwork built from overlapping filled shapes -- which is most
+                // imported artwork -- came out veined with ghost lines.
+                if (fd > 1.0f)
+                {
+                    fillCov = (wn != 0) ? 1.0f : 0.0f;
+                }
+                else
+                {
+                    // Near a contour, sample the winding across the pixel and
+                    // take the area it covers. This is exact about which side of
+                    // the union each sample is on, so an interior boundary
+                    // registers as fully inside on both sides of itself.
+                    int hits = 0;
+                    for (int sy = 0; sy < 4; ++sy)
+                    for (int sx = 0; sx < 4; ++sx)
+                    {
+                        const Vec2 q(px - 0.5f + (static_cast<float>(sx) + 0.5f) * 0.25f,
+                                     py - 0.5f + (static_cast<float>(sy) + 0.5f) * 0.25f);
+                        int w2 = 0;
+                        for (int i = flo; i < fhi; ++i)
+                        {
+                            const int idx = scene.bands.items[i];
+                            if (idx < 0 || idx >= scene.fillCount) continue;
+                            const FillEdge& e = scene.fill[idx];
+                            w2 += WindingContribution(q, e.a, e.b);
+                        }
+                        if (w2 != 0) ++hits;
+                    }
+                    fillCov = static_cast<float>(hits) * (1.0f / 16.0f);
+                }
             }
         }
     }

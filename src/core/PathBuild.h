@@ -270,7 +270,21 @@ inline void BuildStrokeSegments(const Polyline& poly, const Style& st,
     float b = trim.end   + trim.offset;
     if (b - a <= 1e-6f) return;      // fully collapsed: draw nothing, no fudge
 
+    // A zero thickness means NO stroke, not a faint one.
+    //
+    // The shading thresholds coverage at the surface, so a zero-radius run still
+    // lands at exactly 50% coverage along its own centreline -- a hairline that
+    // appears wherever the thickness was deliberately turned off. That matters
+    // most for imported artwork, which is often fill-only: every contour of
+    // every filled shape came back as a ghost line.
+    //
+    // Arrowheads are sized by their own parameters and are emitted regardless,
+    // so a zero-thickness path with an arrow is still an arrow.
+    const bool strokeVisible = (st.halfWidth > 0.0f) &&
+                               (st.widthStart > 0.0f || st.widthMid > 0.0f || st.widthEnd > 0.0f);
+
     auto run = [&](float u0, float u1) {
+        if (!strokeVisible) return;
         if (dashLen > 0.0f)
             detail::EmitDashed(poly, u0 * total, u1 * total, st,
                                dashLen, gapLen, dashPhase, out);

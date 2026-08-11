@@ -1142,11 +1142,14 @@ int main(int argc, char** argv)
     //   linetest out.png --svg file.svg [--fill]
     {
         const char* svgPath = nullptr;
-        bool wantFill = false;
+        bool  wantFill = false;
+        float strokePx = -1.0f;   // <0 means "scale with the cell"
         for (int i = 2; i < argc; ++i)
         {
             if (std::strcmp(argv[i], "--svg") == 0 && i + 1 < argc) svgPath = argv[i + 1];
             if (std::strcmp(argv[i], "--fill") == 0) wantFill = true;
+            if (std::strcmp(argv[i], "--stroke") == 0 && i + 1 < argc)
+                strokePx = static_cast<float>(std::atof(argv[i + 1]));
         }
 
         if (svgPath)
@@ -1174,7 +1177,7 @@ int main(int argc, char** argv)
             std::vector<float> rgba(static_cast<size_t>(size) * size * 4, 0.0f);
 
             Style st;
-            st.halfWidth = size / 300.0f;
+            st.halfWidth = (strokePx >= 0.0f) ? strokePx * 0.5f : size / 300.0f;
             st.feather   = 1.2f;
             st.color     = Color(1.0f, 0.9f, 0.5f, 1.0f);
             st.fill      = wantFill;
