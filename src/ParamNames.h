@@ -76,6 +76,14 @@ inline bool DefaultPointSecret(int stroke, int point)
     return !(stroke == 0 && point < 2);
 }
 
+// --- presets -----------------------------------------------------------------
+constexpr const char* kParamPresetName   = "presetName";
+constexpr const char* kParamPresetSave   = "presetSave";
+constexpr const char* kParamPresetLoad   = "presetLoad";
+constexpr const char* kParamPresetFolder = "presetFolder";
+constexpr const char* kParamPresetSetDir = "presetSetFolder";
+constexpr const char* kParamPresetReset  = "presetReset";
+
 // --- global transform --------------------------------------------------------
 constexpr const char* kParamXfPos    = "xformPosition";
 constexpr const char* kParamXfRot    = "xformRotation";

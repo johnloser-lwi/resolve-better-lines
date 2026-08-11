@@ -8,6 +8,9 @@
 #include "EditBlock.h"
 #include "HostProbe.h"
 #include "ParamNames.h"
+#include "ParamRegistry.h"
+#include "Preset.h"
+#include "PresetIO.h"
 
 #include "core/Anim.h"
 #include "core/Easing.h"
@@ -307,6 +310,23 @@ private:
 
     Stage stageAt(int which, double t) const;
 
+    // --- presets -------------------------------------------------------------
+    bool captureParam(const ParamEntry& e, PresetValue& out) const;
+    void applyParam(const ParamEntry& e, const PresetValue* v);
+    void savePreset();
+    void loadPreset();
+    void resetAll();
+    void syncPresetFolderLabel();
+
+    OFX::StringParam* _presetName   = nullptr;
+    OFX::StringParam* _presetFolder = nullptr;
+
+    /// Suppresses the per-parameter reactions while a whole preset is being
+    /// written. Without it every one of ~240 setValue calls would dispatch back
+    /// into changedParam, and syncVisibility alone would run hundreds of times
+    /// for a single Load.
+    bool _applyingPreset = false;
+
     /// Last secrecy state pushed to the host, so redundant calls can be skipped.
     ///
     /// syncVisibility touches every one of the several hundred point parameters,
@@ -440,8 +460,12 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
         _stOver[i]     = fetchDoubleParam(StageParam(kStageOver, out));
     }
 
+    _presetName   = fetchStringParam(kParamPresetName);
+    _presetFolder = fetchStringParam(kParamPresetFolder);
+    syncPresetFolderLabel();
+
     // Also on load, or a project saved with three strokes would open showing all
-    // eight until something happened to touch the count.
+    // of them until something happened to touch the count.
     syncVisibility();
 }
 
@@ -472,6 +496,237 @@ OFX::Double2DParam* BetterLinePlugin::tanParam(int s, int i) const
         catch (...) { return nullptr; }
     }
     return _tan[s][i];
+}
+
+// =============================================================================
+// Presets
+//
+// Driven entirely by the registry, so every parameter is covered automatically
+// and a new one needs nothing added here.
+// =============================================================================
+
+bool BetterLinePlugin::captureParam(const ParamEntry& e, PresetValue& out) const
+{
+    BetterLinePlugin* self = const_cast<BetterLinePlugin*>(this);
+    out.kind = e.kind;
+
+    try
+    {
+        switch (e.kind)
+        {
+            case kPKDouble:
+                out.count = 1;
+                out.n[0] = self->fetchDoubleParam(e.name)->getValue();
+                return true;
+
+            case kPKDouble2D:
+            {
+                double x = 0, y = 0;
+                self->fetchDouble2DParam(e.name)->getValue(x, y);
+                out.n[0] = x; out.n[1] = y; out.count = 2;
+                return true;
+            }
+            case kPKRGBA:
+            {
+                double r = 0, g = 0, b = 0, a = 0;
+                self->fetchRGBAParam(e.name)->getValue(r, g, b, a);
+                out.n[0] = r; out.n[1] = g; out.n[2] = b; out.n[3] = a; out.count = 4;
+                return true;
+            }
+            case kPKInt:
+                out.count = 1;
+                out.n[0] = self->fetchIntParam(e.name)->getValue();
+                return true;
+
+            case kPKChoice:
+            {
+                int v = 0;
+                self->fetchChoiceParam(e.name)->getValue(v);
+                out.n[0] = v; out.count = 1;
+                return true;
+            }
+            case kPKBool:
+                out.b = self->fetchBooleanParam(e.name)->getValue();
+                return true;
+
+            case kPKString:
+                self->fetchStringParam(e.name)->getValue(out.s);
+                return true;
+
+            default: return false;
+        }
+    }
+    catch (...) { return false; }
+}
+
+/** @brief Apply one parameter, or return it to its default if @p v is null.
+ *
+ * Missing keys resetting to the DEFAULT rather than being left alone is what
+ * makes a preset deterministic: loading the same file from two different
+ * starting states gives the same result. Leaving them alone would mean a preset
+ * quietly inherited whatever happened to be set before it.
+ */
+void BetterLinePlugin::applyParam(const ParamEntry& e, const PresetValue* v)
+{
+    try
+    {
+        switch (e.kind)
+        {
+            case kPKDouble:
+            {
+                OFX::DoubleParam* p = fetchDoubleParam(e.name);
+                p->setValue(v ? v->n[0] : p->getDefault());
+                break;
+            }
+            case kPKDouble2D:
+            {
+                OFX::Double2DParam* p = fetchDouble2DParam(e.name);
+                if (v && v->count >= 2) p->setValue(v->n[0], v->n[1]);
+                else { double x = 0, y = 0; p->getDefault(x, y); p->setValue(x, y); }
+                break;
+            }
+            case kPKRGBA:
+            {
+                OFX::RGBAParam* p = fetchRGBAParam(e.name);
+                if (v && v->count >= 4) p->setValue(v->n[0], v->n[1], v->n[2], v->n[3]);
+                else { double r = 0, g = 0, b = 0, a = 0; p->getDefault(r, g, b, a);
+                       p->setValue(r, g, b, a); }
+                break;
+            }
+            case kPKInt:
+            {
+                OFX::IntParam* p = fetchIntParam(e.name);
+                p->setValue(v ? static_cast<int>(v->n[0]) : p->getDefault());
+                break;
+            }
+            case kPKChoice:
+            {
+                OFX::ChoiceParam* p = fetchChoiceParam(e.name);
+                int d = 0; p->getDefault(d);
+                p->setValue(v ? static_cast<int>(v->n[0]) : d);
+                break;
+            }
+            case kPKBool:
+            {
+                OFX::BooleanParam* p = fetchBooleanParam(e.name);
+                bool d = false; p->getDefault(d);
+                p->setValue(v ? v->b : d);
+                break;
+            }
+            case kPKString:
+            {
+                OFX::StringParam* p = fetchStringParam(e.name);
+                std::string d; p->getDefault(d);
+                p->setValue(v ? v->s : d);
+                break;
+            }
+            default: break;
+        }
+    }
+    catch (...) {}   // a parameter that will not take a value is not worth aborting for
+}
+
+void BetterLinePlugin::savePreset()
+{
+    std::string name;
+    _presetName->getValue(name);
+    name = SanitiseFileName(name);
+
+    // The dialog is deliberately NOT inside an edit block. changedParam is
+    // dispatched synchronously from the button press, so the dialog opens
+    // inside this call -- and a modal Win32 dialog pumps its own message loop.
+    // Holding an OFX edit block open across that hands the host an unbounded
+    // amount of unrelated work while it believes a parameter edit is in flight.
+    std::string path;
+    if (!ChoosePresetToSave(PresetFolder(), name.empty() ? "Better Line" : name, path))
+        return;
+
+    PresetFile file;
+    file.schemaVersion = kPresetSchemaVersion;
+    file.name = name.empty() ? StemOf(path) : name;
+
+    for (const ParamEntry& e : ParamRegistry())
+    {
+        PresetValue v;
+        if (captureParam(e, v)) file.params[e.name] = v;
+    }
+
+    std::string error;
+    if (!WriteTextFile(path, PresetToJson(file), error))
+    {
+        sendMessage(OFX::Message::eMessageError, "",
+                    "Could not save the preset:\n" + error);
+        return;
+    }
+
+    bl::ProbeLog("preset saved: " + path + "  (" +
+                 std::to_string(file.params.size()) + " parameters)");
+}
+
+void BetterLinePlugin::loadPreset()
+{
+    std::string path;
+    if (!ChoosePresetToOpen(PresetFolder(), path)) return;   // dialog outside any block
+
+    std::string text, error;
+    if (!ReadTextFile(path, text, error))
+    {
+        sendMessage(OFX::Message::eMessageError, "",
+                    "Could not read the preset:\n" + error);
+        return;
+    }
+
+    PresetFile file;
+    if (!PresetFromJson(text, file, error))
+    {
+        // Refused rather than partially applied: half a preset is a state the
+        // user never authored and cannot get back from.
+        sendMessage(OFX::Message::eMessageError, "",
+                    "That file is not a valid Better Line preset:\n" + error);
+        return;
+    }
+
+    {
+        // One edit block for the whole batch. It is what tells the host an edit
+        // happened at all, and it collapses ~240 writes into a single undo step
+        // and a single cache invalidation instead of 240 of each.
+        bl::EditBlock block(this, "Load Better Line Preset");
+        _applyingPreset = true;
+
+        for (const ParamEntry& e : ParamRegistry())
+        {
+            auto it = file.params.find(e.name);
+            applyParam(e, it == file.params.end() ? nullptr : &it->second);
+        }
+
+        _applyingPreset = false;
+    }
+
+    // Once, after the batch, rather than on each of 240 changedParam callbacks.
+    syncVisibility();
+
+    if (!file.name.empty()) _presetName->setValue(file.name);
+    bl::ProbeLog("preset loaded: " + path);
+}
+
+void BetterLinePlugin::resetAll()
+{
+    {
+        bl::EditBlock block(this, "Reset Better Line");
+        _applyingPreset = true;
+        for (const ParamEntry& e : ParamRegistry()) applyParam(e, nullptr);
+        _applyingPreset = false;
+    }
+    syncVisibility();
+}
+
+void BetterLinePlugin::syncPresetFolderLabel()
+{
+    // Shown resolved rather than as "(default)": the point of the read-out is to
+    // answer "where will the dialog open", and "default" only moves the question
+    // along.
+    try { if (_presetFolder) _presetFolder->setValue(PresetFolder()); }
+    catch (...) {}
 }
 
 /** @brief One place, one pass.
@@ -534,6 +789,30 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& /*p_Args*/,
 {
     bl::ProbeScope _t("changedParam");
     if (_syncingEase) return;
+
+    // While a preset is being written, every setValue dispatches back here.
+    // Reacting to each would run syncVisibility hundreds of times for one Load,
+    // and would let an easing control stamp Custom over a preset's own preset.
+    if (_applyingPreset) return;
+
+    if (p_ParamName == kParamPresetSave)   { savePreset(); return; }
+    if (p_ParamName == kParamPresetLoad)   { loadPreset(); return; }
+    if (p_ParamName == kParamPresetReset)  { resetAll();   return; }
+    if (p_ParamName == kParamPresetSetDir)
+    {
+        std::string picked;
+        if (!ChooseFolder(PresetFolder(), picked)) return;   // modal: no edit block
+
+        std::string error;
+        if (!SavePresetFolderSetting(picked, error))
+        {
+            sendMessage(OFX::Message::eMessageError, "",
+                        "Could not save the preset folder setting:\n" + error);
+            return;
+        }
+        syncPresetFolderLabel();
+        return;
+    }
 
     if (p_ParamName == kParamStrokeCount) { syncVisibility(); return; }
 
@@ -1074,11 +1353,27 @@ using namespace bl;
 /// of hand in the first place.
 int g_paramCount = 0;
 
+// Which registry kind a descriptor corresponds to. Non-template overloads beat
+// the catch-all, so anything without one -- groups, pages, push buttons -- is
+// correctly recorded as having no value to save.
+template <class T> int KindOf(T*)                            { return kPKNone; }
+inline int KindOf(OFX::DoubleParamDescriptor*)               { return kPKDouble; }
+inline int KindOf(OFX::Double2DParamDescriptor*)             { return kPKDouble2D; }
+inline int KindOf(OFX::IntParamDescriptor*)                  { return kPKInt; }
+inline int KindOf(OFX::BooleanParamDescriptor*)              { return kPKBool; }
+inline int KindOf(OFX::ChoiceParamDescriptor*)               { return kPKChoice; }
+inline int KindOf(OFX::RGBAParamDescriptor*)                 { return kPKRGBA; }
+inline int KindOf(OFX::StringParamDescriptor*)               { return kPKString; }
+
 template <class T> T* AddParam(OFX::PageParamDescriptor* page, T* p)
 {
     p->setCacheInvalidation(OFX::eCacheInvalidateValueAll);
     page->addChild(*p);
     ++g_paramCount;
+    // Registered at the point of definition, so the preset system covers every
+    // parameter automatically -- including ones added later, which is the whole
+    // reason for doing it here rather than in a hand-written list.
+    RegisterParam(p->getName(), KindOf(p));
     return p;
 }
 
@@ -1192,6 +1487,71 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
         // slots hold real points" unanswerable.
         p->setAnimates(false);
         AddParam(page, p);
+    }
+
+    // --- presets -------------------------------------------------------------
+    // First, because a preset is the thing you reach for before anything else.
+    // None of these are themselves saved into a preset -- they go through
+    // AddParamUI, which does not register. A preset recording where presets live
+    // would overwrite that setting on every load.
+    {
+        OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "presetGroup", "Presets");
+
+        {
+            OFX::StringParamDescriptor* p = p_Desc.defineStringParam(kParamPresetName);
+            p->setLabels("Preset Name", "Preset Name", "Preset Name");
+            p->setHint("Offered as the file name when saving.");
+            p->setStringType(OFX::eStringTypeSingleLine);
+            p->setDefault("");
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamPresetSave);
+            p->setLabels("Save Preset...", "Save Preset...", "Save Preset...");
+            p->setHint("Writes every setting to a .json file.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamPresetLoad);
+            p->setLabels("Load Preset...", "Load Preset...", "Load Preset...");
+            p->setHint("Applies every setting in the file. Anything the file does not "
+                       "mention is returned to its default, so loading the same preset "
+                       "always gives the same result whatever was set before.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            // Read-out, not an input. Resolve draws a value field beside a string
+            // parameter whether or not one makes sense, so it is greyed out --
+            // an editable-looking path that is ignored is worse than no path.
+            OFX::StringParamDescriptor* p = p_Desc.defineStringParam(kParamPresetFolder);
+            p->setLabels("Folder", "Folder", "Folder");
+            p->setStringType(OFX::eStringTypeSingleLine);
+            p->setDefault("");
+            p->setEnabled(false);
+            p->setAnimates(false);
+            p->setIsPersistant(false);   // recomputed on load; it is not project data
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamPresetSetDir);
+            p->setLabels("Set Folder...", "Set Folder...", "Set Folder...");
+            p->setHint("Where the preset dialogs open. Stored per machine, outside the "
+                       "project, because it belongs to you rather than to this timeline.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
+        {
+            OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamPresetReset);
+            p->setLabels("Reset All", "Reset All", "Reset All");
+            p->setHint("Returns every setting to its default.");
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
     }
 
     // --- shape ---------------------------------------------------------------

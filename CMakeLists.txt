@@ -94,10 +94,13 @@ endif()
 add_library(BetterLine MODULE
     src/BetterLinePlugin.cpp
     src/HostProbe.cpp
+    src/Preset.cpp
+    src/PresetIO.cpp
     src/interact/Overlay.cpp
 )
 target_include_directories(BetterLine PRIVATE src)
-target_link_libraries(BetterLine PRIVATE ofxsupport)
+# comdlg32 for the file dialogs, shell32/ole32 for the folder picker.
+target_link_libraries(BetterLine PRIVATE ofxsupport comdlg32 shell32 ole32)
 
 if(BETTERLINE_HAVE_CUDA)
     target_link_libraries(BetterLine PRIVATE blcuda)
@@ -114,7 +117,9 @@ set_target_properties(BetterLine PROPERTIES
 # --- Offline harness ---------------------------------------------------------
 # Renders a path spec straight to PNG with no host in the loop. This is where
 # antialiasing quality, caps, dash boundaries and taper continuity get judged.
-add_executable(linetest tools/linetest.cpp)
+# Preset.cpp is deliberately free of OFX and Win32, so the harness links it and
+# the JSON schema is exercised with no host in the loop.
+add_executable(linetest tools/linetest.cpp src/Preset.cpp)
 target_include_directories(linetest PRIVATE src third_party/stb)
 
 # Not everything the harness knows is a picture. The stagger ordering has to be

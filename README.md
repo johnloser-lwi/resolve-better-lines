@@ -431,6 +431,53 @@ show a list of numbers.
 | Click a point | select it, which reveals that stroke's tangent handles |
 | Drag a curve-editor handle | reshape the In or Out easing curve |
 
+## Presets
+
+Resolve gives OFX plugins no preset mechanism of its own, so this is one: **Save Preset**,
+**Load Preset**, a **Reset All**, and a preset **folder** you can point anywhere.
+
+Files are plain JSON in `Documents\BetterLine\Presets`, readable and hand-editable. The folder
+is overridable and remembered in `%LOCALAPPDATA%\BetterLine\settings.json` — deliberately *not*
+an OFX parameter, because a parameter lives inside the **project**: it travels with the
+timeline and belongs to one instance of the effect. "Where my presets live" belongs to the
+person and the machine and has to apply to every instance ever created, including ones in
+projects that do not exist yet.
+
+**Driven by a registry, not a hand-written struct.** Multi Transform mirrors each parameter by
+hand — struct, serialiser, parser — 370 lines for ~100 parameters. This plugin has well over
+200, and every new one would have to be added in all three places; forgetting produces a
+preset that silently does not save that setting, a bug with no symptom until someone reloads
+and quietly loses their work. Instead every parameter registers its name and type at the point
+of definition (they already funnel through two helpers), and save/load iterate that list. New
+parameters are covered automatically.
+
+Details that matter:
+
+- **A missing key resets that parameter to its default**, rather than leaving it alone. That is
+  what makes a preset deterministic: loading the same file from two different starting states
+  gives the same result, instead of quietly inheriting whatever was set before.
+- **A malformed file is refused, not partially applied.** Half a preset is a state the user
+  never authored and cannot get back from.
+- **The whole load is one edit block** — one undo step and one cache invalidation instead of
+  240 of each — with a re-entrancy guard, since every `setValue` dispatches back into
+  `changedParam` and `syncVisibility` would otherwise run hundreds of times per load.
+- **The file dialogs are never inside an edit block.** `changedParam` is dispatched
+  synchronously from the button press, so the dialog opens inside that call, and a modal Win32
+  dialog pumps its own message loop — holding a block open across that hands the host an
+  unbounded amount of unrelated work while it believes an edit is in flight.
+- Numbers are written with **nine significant digits**, the documented minimum to round-trip a
+  float. At the default six, every point would shift slightly each time a preset was saved and
+  reloaded.
+- Parameters are written **sorted**, so saving twice from the same state produces byte-identical
+  files — diffable, and sensible to keep in version control.
+- Preset controls are themselves excluded from presets. A preset recording where presets live
+  would overwrite that setting on every load.
+
+`linetest --sheet check` round-trips every value type including quotes, backslashes, tabs,
+control characters and empty strings, and asserts that malformed input is rejected.
+
+*Not saved:* keyframe curves. A preset stores each parameter's current value.
+
 ### Global transform
 
 `Position`, `Rotation`, `Scale` and `Anchor` move every stroke together. Editing points one

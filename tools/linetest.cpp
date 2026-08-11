@@ -13,6 +13,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "Preset.h"
 #include "core/Geometry.h"
 #include "core/PathBuild.h"
 #include "core/Raster.h"
@@ -1000,6 +1001,73 @@ int main(int argc, char** argv)
             std::printf("xform inverse round-trip: worst=%.6f  %s\n",
                         worst, ok ? "ok" : "FAILED");
             if (!ok) ++failures;
+        }
+
+        // Preset JSON round-trip. A preset that silently loses or corrupts a
+        // value is the worst failure this plugin has -- it looks like it worked
+        // and the loss only surfaces later, when the original is gone.
+        {
+            PresetFile in;
+            in.name = "round \"trip\" \\ test\nwith control\x01char";
+            auto num = [](const char* k, double v, PresetFile& f) {
+                PresetValue p; p.kind = kPKDouble; p.count = 1; p.n[0] = v; f.params[k] = p;
+            };
+            num("zero", 0.0, in);
+            num("neg", -1234.56789, in);
+            num("tiny", 1.0e-7, in);
+            num("big", 987654.321, in);
+            // Nine significant digits is what makes a float survive save/reload;
+            // at the default six a point would shift every time.
+            num("precise", 0.123456789, in);
+
+            { PresetValue p; p.kind = kPKDouble2D; p.count = 2;
+              p.n[0] = 0.25; p.n[1] = -0.75; in.params["xy"] = p; }
+            { PresetValue p; p.kind = kPKRGBA; p.count = 4;
+              p.n[0] = 1.0; p.n[1] = 0.5; p.n[2] = 0.0; p.n[3] = 0.125;
+              in.params["rgba"] = p; }
+            { PresetValue p; p.kind = kPKBool; p.b = true;  in.params["yes"] = p; }
+            { PresetValue p; p.kind = kPKBool; p.b = false; in.params["no"]  = p; }
+            { PresetValue p; p.kind = kPKString;
+              p.s = "quotes \" backslash \\ tab\t end"; in.params["str"] = p; }
+            { PresetValue p; p.kind = kPKString; p.s = ""; in.params["empty"] = p; }
+
+            PresetFile out;
+            std::string err;
+            if (!PresetFromJson(PresetToJson(in), out, err))
+            {
+                std::printf("preset round-trip: PARSE FAILED (%s)\n", err.c_str());
+                ++failures;
+            }
+            else
+            {
+                int bad = 0;
+                if (out.name != in.name) { std::printf("  name differs\n"); ++bad; }
+                for (const auto& kv : in.params)
+                {
+                    auto it = out.params.find(kv.first);
+                    if (it == out.params.end()) { std::printf("  lost %s\n", kv.first.c_str()); ++bad; continue; }
+
+                    const PresetValue& a = kv.second;
+                    const PresetValue& b = it->second;
+                    if (a.kind == kPKString) { if (a.s != b.s) { std::printf("  %s string differs\n", kv.first.c_str()); ++bad; } }
+                    else if (a.kind == kPKBool) { if (a.b != b.b) { std::printf("  %s bool differs\n", kv.first.c_str()); ++bad; } }
+                    else for (int k = 0; k < a.count; ++k)
+                        if (std::fabs(a.n[k] - b.n[k]) > 1e-9 * std::max(1.0, std::fabs(a.n[k])))
+                        { std::printf("  %s[%d] %.17g != %.17g\n", kv.first.c_str(), k, a.n[k], b.n[k]); ++bad; }
+                }
+
+                // A malformed file must be REFUSED, not partially applied.
+                PresetFile ignored;
+                const char* junk[] = { "", "{", "not json", "{\"params\":}", "{\"name\": }" };
+                for (const char* j : junk)
+                {
+                    if (PresetFromJson(j, ignored, err))
+                    { std::printf("  accepted malformed input: %s\n", j); ++bad; }
+                }
+
+                std::printf("preset round-trip: %s\n", bad == 0 ? "ok" : "FAILED");
+                failures += bad;
+            }
         }
 
         std::printf("check: %d failures\n", failures);
