@@ -14,6 +14,7 @@
 #include "ofxsSupportPrivate.h"
 
 #include "core/Common.h"
+#include "core/Geometry.h"   // Xform2D
 
 namespace bl {
 
@@ -23,6 +24,11 @@ struct OverlayContext
     OfxPointD  pixelScale{1.0, 1.0};
     OfxRectD   rod{0.0, 0.0, 1.0, 1.0};
     double     time = 0.0;
+
+    /// The global transform, in CANONICAL units. Handles are drawn through it so
+    /// they sit on the line the user can see, and drags are carried back through
+    /// its inverse before being written.
+    Xform2D    xform;
 
     /// Screen pixels -> canonical units. Every handle size, hit radius and text
     /// offset in the overlay goes through one of these two.

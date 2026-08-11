@@ -220,6 +220,11 @@ private:
     OFX::Double2DParam* posParam(int s, int i) const;
     OFX::Double2DParam* tanParam(int s, int i) const;
 
+    OFX::Double2DParam* _xfPos    = nullptr;
+    OFX::DoubleParam*   _xfRot    = nullptr;
+    OFX::Double2DParam* _xfScale  = nullptr;
+    OFX::Double2DParam* _xfAnchor = nullptr;
+
     OFX::RGBAParam*    _color      = nullptr;
     OFX::DoubleParam*  _opacity    = nullptr;
     OFX::DoubleParam*  _thickness  = nullptr;
@@ -347,6 +352,11 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
         for (int i = 0; i < kMaxPoints; ++i) _secretPos[s][i] = DefaultPointSecret(s, i);
     }
     _secretKnown = true;
+
+    _xfPos    = fetchDouble2DParam(kParamXfPos);
+    _xfRot    = fetchDoubleParam(kParamXfRot);
+    _xfScale  = fetchDouble2DParam(kParamXfScale);
+    _xfAnchor = fetchDouble2DParam(kParamXfAnchor);
 
     _color      = fetchRGBAParam(kParamColor);
     _opacity    = fetchDoubleParam(kParamOpacity);
@@ -765,6 +775,23 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
     int wiggleSeed = 1;
     _wiggleSeed->getValue(wiggleSeed);
 
+    // Built in PIXEL space. Normalised units are not square on a non-square
+    // frame, so rotating there shears the shape instead of turning it -- and
+    // differently at every timeline resolution.
+    Xform2D xf;
+    {
+        double ax = 0.5, ay = 0.5, ox = 0.0, oy = 0.0, sx = 1.0, sy = 1.0;
+        _xfAnchor->getValueAtTime(t, ax, ay);
+        _xfPos->getValueAtTime(t, ox, oy);
+        _xfScale->getValueAtTime(t, sx, sy);
+
+        xf = MakeXform(Vec2(static_cast<float>(rod.x1 + ax * w),
+                            static_cast<float>(rod.y1 + ay * h)),
+                       Vec2(static_cast<float>(ox * w), static_cast<float>(oy * h)),
+                       static_cast<float>(DoubleAt(_xfRot, t)),
+                       static_cast<float>(sx), static_cast<float>(sy));
+    }
+
     int strokes = 1;
     _strokeCount->getValueAtTime(t, strokes);
     strokes = strokes < 1 ? 1 : (strokes > kMaxStrokes ? kMaxStrokes : strokes);
@@ -800,6 +827,16 @@ void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderSc
             // same way positions do; using the height for both axes would skew
             // every curve on a non-square frame.
             cp.tan = Vec2(static_cast<float>(tx * w), static_cast<float>(ty * h));
+
+            // A handle is an offset from its point, so it rotates and scales
+            // with the shape but must NOT be translated -- applying the position
+            // to it as well would double every handle's length.
+            if (!xf.IsIdentity())
+            {
+                cp.pos = xf.Apply(cp.pos);
+                cp.tan = xf.ApplyVector(cp.tan);
+            }
+
             stroke.pts.push_back(cp);
         }
 
@@ -1247,6 +1284,39 @@ void BetterLinePluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_De
             tan->setParent(*g);
             AddParam(page, tan);
         }
+    }
+
+    // --- global transform ----------------------------------------------------
+    {
+        OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "xformGroup", "Transform");
+
+        auto xy = [&](const char* name, const char* label, const char* hint,
+                      double dx, double dy, double lo, double hi) {
+            OFX::Double2DParamDescriptor* p = p_Desc.defineDouble2DParam(name);
+            p->setLabels(label, label, label);
+            p->setHint(hint);
+            p->setDoubleType(OFX::eDoubleTypePlain);
+            p->setDefault(dx, dy);
+            p->setRange(-1000.0, -1000.0, 1000.0, 1000.0);
+            p->setDisplayRange(lo, lo, hi, hi);
+            p->setIncrement(0.001);
+            p->setParent(*g);
+            AddParam(page, p);
+        };
+
+        xy(kParamXfPos, "Position",
+           "Moves every stroke together, as a fraction of the frame. Keyframe it to "
+           "fly the whole shape around without touching a single point.",
+           0.0, 0.0, -1.0, 1.0);
+
+        DefineDouble(p_Desc, page, g, kParamXfRot, "Rotation",
+                     "Degrees, about the Anchor.", 0.0, -100000.0, 100000.0, -180.0, 180.0);
+
+        xy(kParamXfScale, "Scale", "About the Anchor.", 1.0, 1.0, 0.0, 3.0);
+
+        xy(kParamXfAnchor, "Anchor",
+           "The point rotation and scale pivot around, as a fraction of the frame. "
+           "0.5, 0.5 is the centre.", 0.5, 0.5, 0.0, 1.0);
     }
 
     // --- style ---------------------------------------------------------------

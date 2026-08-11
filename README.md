@@ -431,6 +431,34 @@ show a list of numbers.
 | Click a point | select it, which reveals that stroke's tangent handles |
 | Drag a curve-editor handle | reshape the In or Out easing curve |
 
+### Global transform
+
+`Position`, `Rotation`, `Scale` and `Anchor` move every stroke together. Editing points one
+at a time is fine for *drawing* a shape and useless for *placing* one — nudging a six-point
+arrow across the frame means six drags that all have to agree. All four are keyframable, so
+this is also how you fly a whole shape around without touching a point.
+
+Applied in **pixel space**, not in the normalised space points are stored in. Normalised units
+are not square on a non-square frame, so a rotation performed there shears the shape instead of
+turning it — a rotated square would come out as a rhombus, and differently at every timeline
+resolution.
+
+Bezier handles go through the **vector** form: they are offsets from their point, so they
+rotate and scale with the shape but must not be translated. Applying the position to them as
+well would double every handle's length.
+
+**The overlay draws handles transformed and writes drags back through the inverse.** Drawing
+untransformed positions would put every handle somewhere the stroke is not, the moment the
+transform is touched; and storing a drag without inverting it would apply the transform a
+second time on the next draw, so the point would run away from the cursor. Insert-on-curve
+inverts too, since the click lands on the transformed curve.
+
+`linetest --sheet check` asserts the inverse round-trips across pivots, offsets, rotations,
+non-uniform and mirrored scales — including a near-zero scale, which is not invertible and is
+guarded to a no-op on that axis so a shape scaled to nothing can still be scaled back up.
+A drift here would be invisible in any single frame and would creep a little further on every
+mouse-move event.
+
 ### The easing curve editor
 
 `Show Curve Editor` draws an editable easing curve in the viewer, for the In or Out stage.

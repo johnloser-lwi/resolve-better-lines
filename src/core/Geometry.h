@@ -48,6 +48,92 @@ struct Polyline
     bool  Valid() const { return pts.size() >= 2 && Total() > 1e-6f; }
 };
 
+/** @brief A 2D similarity transform applied to every point of every stroke.
+ *
+ * Editing points one at a time is fine for drawing a shape and useless for
+ * placing one: nudging a six-point arrow across the frame means six drags that
+ * must all agree. This is the handle on the whole thing.
+ *
+ * Deliberately applied in PIXEL space, not in the normalised space the points
+ * are stored in. Normalised units are not square on a non-square frame, so a
+ * rotation performed there shears the shape instead of turning it -- a rotated
+ * square would come out as a rhombus, and worse, differently on every timeline
+ * resolution.
+ */
+struct Xform2D
+{
+    Vec2  pivot{0.0f, 0.0f};
+    Vec2  offset{0.0f, 0.0f};
+    float cosR = 1.0f, sinR = 0.0f;
+    float scaleX = 1.0f, scaleY = 1.0f;
+
+    BL_HD bool IsIdentity() const
+    {
+        return offset.x == 0.0f && offset.y == 0.0f &&
+               sinR == 0.0f && cosR == 1.0f &&
+               scaleX == 1.0f && scaleY == 1.0f;
+    }
+
+    /// Scale, then rotate, about the pivot; then translate.
+    BL_HD Vec2 Apply(Vec2 p) const
+    {
+        const float dx = (p.x - pivot.x) * scaleX;
+        const float dy = (p.y - pivot.y) * scaleY;
+        return Vec2(pivot.x + dx * cosR - dy * sinR + offset.x,
+                    pivot.y + dx * sinR + dy * cosR + offset.y);
+    }
+
+    /// For direction-like quantities -- bezier handles are offsets from their
+    /// point, so they must rotate and scale but must NOT be translated.
+    BL_HD Vec2 ApplyVector(Vec2 v) const
+    {
+        const float dx = v.x * scaleX;
+        const float dy = v.y * scaleY;
+        return Vec2(dx * cosR - dy * sinR, dx * sinR + dy * cosR);
+    }
+
+    /// The inverse, needed by the overlay: handles are DISPLAYED transformed, so
+    /// a drag arrives in transformed space and has to be carried back before it
+    /// is written to the point it came from. Without this every drag would be
+    /// applied twice -- once by the user and once by the transform.
+    ///
+    /// A zero scale is not invertible; the guard makes it a no-op on that axis
+    /// rather than a division by zero, so a shape scaled to nothing can still be
+    /// scaled back up instead of becoming permanently unusable.
+    BL_HD Vec2 ApplyInverse(Vec2 p) const
+    {
+        const float dx = p.x - offset.x - pivot.x;
+        const float dy = p.y - offset.y - pivot.y;
+        const float rx =  dx * cosR + dy * sinR;
+        const float ry = -dx * sinR + dy * cosR;
+        const float ax = (scaleX * scaleX > 1e-12f) ? scaleX : 1.0f;
+        const float ay = (scaleY * scaleY > 1e-12f) ? scaleY : 1.0f;
+        return Vec2(pivot.x + rx / ax, pivot.y + ry / ay);
+    }
+
+    BL_HD Vec2 ApplyVectorInverse(Vec2 v) const
+    {
+        const float rx =  v.x * cosR + v.y * sinR;
+        const float ry = -v.x * sinR + v.y * cosR;
+        const float ax = (scaleX * scaleX > 1e-12f) ? scaleX : 1.0f;
+        const float ay = (scaleY * scaleY > 1e-12f) ? scaleY : 1.0f;
+        return Vec2(rx / ax, ry / ay);
+    }
+};
+
+inline Xform2D MakeXform(Vec2 pivot, Vec2 offset, float degrees, float sx, float sy)
+{
+    Xform2D x;
+    x.pivot  = pivot;
+    x.offset = offset;
+    const float r = degrees * 0.01745329252f;
+    x.cosR = ::cosf(r);
+    x.sinR = ::sinf(r);
+    x.scaleX = sx;
+    x.scaleY = sy;
+    return x;
+}
+
 /** @brief Point on a cubic bezier at parameter t. */
 inline Vec2 CubicAt(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t)
 {

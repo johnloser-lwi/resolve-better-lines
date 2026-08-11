@@ -76,6 +76,12 @@ inline bool DefaultPointSecret(int stroke, int point)
     return !(stroke == 0 && point < 2);
 }
 
+// --- global transform --------------------------------------------------------
+constexpr const char* kParamXfPos    = "xformPosition";
+constexpr const char* kParamXfRot    = "xformRotation";
+constexpr const char* kParamXfScale  = "xformScale";
+constexpr const char* kParamXfAnchor = "xformAnchor";
+
 // --- style -------------------------------------------------------------------
 constexpr const char* kParamColor      = "color";
 constexpr const char* kParamOpacity    = "opacity";

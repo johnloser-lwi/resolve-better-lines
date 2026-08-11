@@ -122,6 +122,11 @@ private:
     mutable OFX::Double2DParam* _tan[kMaxStrokes][kMaxPoints] = {};
 
     // --- easing curve editor -------------------------------------------------
+    OFX::Double2DParam* _xfPos    = nullptr;
+    OFX::DoubleParam*   _xfRot    = nullptr;
+    OFX::Double2DParam* _xfScale  = nullptr;
+    OFX::Double2DParam* _xfAnchor = nullptr;
+
     OFX::BooleanParam* _showCurve  = nullptr;
     OFX::ChoiceParam*  _curveStage = nullptr;
     OFX::DoubleParam*  _easeIn[2]  = {};
@@ -186,6 +191,11 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
             // interact is rebuilt whenever the viewer wants one, and fetching
             // 256 parameters to draw a two-point line is most of that cost.
         }
+        _xfPos    = _effect->fetchDouble2DParam(kParamXfPos);
+        _xfRot    = _effect->fetchDoubleParam(kParamXfRot);
+        _xfScale  = _effect->fetchDouble2DParam(kParamXfScale);
+        _xfAnchor = _effect->fetchDouble2DParam(kParamXfAnchor);
+
         _showCurve  = _effect->fetchBooleanParam(kParamShowCurve);
         _curveStage = _effect->fetchChoiceParam(kParamCurveStage);
         for (int i = 0; i < 2; ++i)
@@ -270,7 +280,13 @@ OfxPointD BetterLineInteract::posAt(const OverlayContext& c, int s, int i) const
     // keyframable, so the handle has to sit where the animation puts it at this
     // frame rather than on some static value the user last typed.
     if (OFX::Double2DParam* p = pos(s, i)) p->getValueAtTime(c.time, x, y);
-    return c.toCanonical(x, y);
+
+    // Through the global transform, so the handle sits on the line the user can
+    // actually see. Drawing the untransformed position would put every handle
+    // somewhere the stroke is not the moment the transform is touched.
+    const OfxPointD q = c.toCanonical(x, y);
+    const Vec2 t = c.xform.Apply(Vec2(static_cast<float>(q.x), static_cast<float>(q.y)));
+    return { t.x, t.y };
 }
 
 OfxPointD BetterLineInteract::tanTip(const OverlayContext& c, int s, int i,
@@ -279,8 +295,10 @@ OfxPointD BetterLineInteract::tanTip(const OverlayContext& c, int s, int i,
     double tx = 0.0, ty = 0.0;
     if (OFX::Double2DParam* q = tan(s, i)) q->getValueAtTime(c.time, tx, ty);
 
-    const OfxPointD p = posAt(c, s, i);
-    const OfxPointD d = c.offsetToCanonical(tx, ty);
+    const OfxPointD p = posAt(c, s, i);   // already transformed
+    const OfxPointD d0 = c.offsetToCanonical(tx, ty);
+    const Vec2 d = c.xform.ApplyVector(Vec2(static_cast<float>(d0.x),
+                                            static_cast<float>(d0.y)));
     return outward ? OfxPointD{p.x + d.x, p.y + d.y}
                    : OfxPointD{p.x - d.x, p.y - d.y};
 }
@@ -302,8 +320,8 @@ void BetterLineInteract::buildStroke(const OverlayContext& c, int s, Stroke& out
         const OfxPointD d = c.offsetToCanonical(tx, ty);
 
         ControlPoint cp;
-        cp.pos = Vec2(static_cast<float>(p.x), static_cast<float>(p.y));
-        cp.tan = Vec2(static_cast<float>(d.x), static_cast<float>(d.y));
+        cp.pos = c.xform.Apply(Vec2(static_cast<float>(p.x), static_cast<float>(p.y)));
+        cp.tan = c.xform.ApplyVector(Vec2(static_cast<float>(d.x), static_cast<float>(d.y)));
         out.pts.push_back(cp);
     }
 }
@@ -327,8 +345,23 @@ bool BetterLineInteract::buildContext(double time, const OfxPointD& pixelScale,
         if (!clip) return false;
 
         out.rod = clip->getRegionOfDefinition(time);
-        if (out.rod.x2 - out.rod.x1 <= 0.0 || out.rod.y2 - out.rod.y1 <= 0.0)
-            return false;
+        const double w = out.rod.x2 - out.rod.x1;
+        const double h = out.rod.y2 - out.rod.y1;
+        if (w <= 0.0 || h <= 0.0) return false;
+
+        // Same transform the renderer builds, in canonical rather than pixel
+        // units -- which are the same shape, so rotation behaves identically.
+        double ax = 0.5, ay = 0.5, ox = 0.0, oy = 0.0, sx = 1.0, sy = 1.0, rot = 0.0;
+        if (_xfAnchor) _xfAnchor->getValueAtTime(time, ax, ay);
+        if (_xfPos)    _xfPos->getValueAtTime(time, ox, oy);
+        if (_xfScale)  _xfScale->getValueAtTime(time, sx, sy);
+        if (_xfRot)    _xfRot->getValueAtTime(time, rot);
+
+        out.xform = MakeXform(Vec2(static_cast<float>(out.rod.x1 + ax * w),
+                                   static_cast<float>(out.rod.y1 + ay * h)),
+                              Vec2(static_cast<float>(ox * w), static_cast<float>(oy * h)),
+                              static_cast<float>(rot),
+                              static_cast<float>(sx), static_cast<float>(sy));
     }
     catch (...) { return false; }
 
@@ -960,8 +993,13 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
 
             if (bestS >= 0 && bestD < 10.0)
             {
+                // The click landed on the transformed curve, so the point it
+                // becomes has to be stored in untransformed space.
+                const Vec2 back = c.xform.ApplyInverse(
+                    Vec2(static_cast<float>(pen.x), static_cast<float>(pen.y)));
+
                 double nx = 0, ny = 0;
-                c.toNormalised(pen.x, pen.y, nx, ny);
+                c.toNormalised(back.x, back.y, nx, ny);
                 insertPoint(bestS, bestSpan + 1, nx, ny, c.time);
                 _selected = {bestS, bestSpan + 1};
                 requestRedraw();
@@ -1044,8 +1082,15 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
             // point's own original position.
             if (_shiftDown) axisLock(cx, cy, _pressPos.x + _grab.x, _pressPos.y + _grab.y);
 
+            // Back through the transform before writing. The handle was drawn
+            // transformed, so the drag arrives in transformed space -- storing
+            // it straight would apply the transform a second time on the next
+            // draw, and the point would run away from the cursor.
+            const Vec2 back = c.xform.ApplyInverse(Vec2(static_cast<float>(cx),
+                                                        static_cast<float>(cy)));
+
             double nx = 0, ny = 0;
-            c.toNormalised(cx, cy, nx, ny);
+            c.toNormalised(back.x, back.y, nx, ny);
             writePoint(pos(s, i), c.time, nx, ny);
         }
         else
@@ -1064,11 +1109,16 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
             // whole reason a point costs two Double2Ds rather than three.
             if (_drag == kDragTanIn) { dx = -dx; dy = -dy; }
 
+            // A handle is a direction, so it goes back through the VECTOR
+            // inverse -- the translation must not be subtracted from it.
+            const Vec2 back = c.xform.ApplyVectorInverse(
+                Vec2(static_cast<float>(dx), static_cast<float>(dy)));
+
             const double w = c.rod.x2 - c.rod.x1;
             const double h = c.rod.y2 - c.rod.y1;
             writePoint(tan(s, i), c.time,
-                       (w > 1e-9) ? dx / w : 0.0,
-                       (h > 1e-9) ? dy / h : 0.0);
+                       (w > 1e-9) ? back.x / w : 0.0,
+                       (h > 1e-9) ? back.y / h : 0.0);
         }
 
         requestRedraw();

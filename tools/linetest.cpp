@@ -963,7 +963,46 @@ int main(int argc, char** argv)
                 }
             }
         }
-        std::printf("stagger order check: %d failures\n", failures);
+        // The global transform's inverse. The overlay DRAWS handles transformed
+        // and writes drags back through this, so an inverse that is even
+        // slightly wrong makes points creep away from the cursor a little more
+        // on every mouse-move event -- a drift no single frame would reveal.
+        {
+            const Vec2 pivots[]  = { {0.0f, 0.0f}, {960.0f, 540.0f}, {-120.0f, 77.0f} };
+            const Vec2 offsets[] = { {0.0f, 0.0f}, {33.0f, -210.0f} };
+            const float rots[]   = { 0.0f, 30.0f, -117.0f, 180.0f, 359.5f };
+            const Vec2 scales[]  = { {1.0f, 1.0f}, {2.0f, 0.5f}, {-1.0f, 1.0f}, {0.01f, 3.0f} };
+            const Vec2 probes[]  = { {0.0f, 0.0f}, {1920.0f, 1080.0f}, {-500.0f, 250.0f} };
+
+            double worst = 0.0;
+            for (const Vec2& pv : pivots)
+            for (const Vec2& of : offsets)
+            for (float r : rots)
+            for (const Vec2& sc : scales)
+            {
+                const Xform2D x = MakeXform(pv, of, r, sc.x, sc.y);
+                for (const Vec2& p : probes)
+                {
+                    const Vec2 back = x.ApplyInverse(x.Apply(p));
+                    worst = std::max<double>(worst, std::fabs(back.x - p.x));
+                    worst = std::max<double>(worst, std::fabs(back.y - p.y));
+
+                    const Vec2 vb = x.ApplyVectorInverse(x.ApplyVector(p));
+                    worst = std::max<double>(worst, std::fabs(vb.x - p.x));
+                    worst = std::max<double>(worst, std::fabs(vb.y - p.y));
+                }
+            }
+
+            // Generous in absolute terms because the probes are full-frame
+            // coordinates, and tight relative to them: 1e-2 of 1920 is five
+            // millionths, well under a pixel of drift per drag event.
+            const bool ok = (worst < 1e-2);
+            std::printf("xform inverse round-trip: worst=%.6f  %s\n",
+                        worst, ok ? "ok" : "FAILED");
+            if (!ok) ++failures;
+        }
+
+        std::printf("check: %d failures\n", failures);
         return failures == 0 ? 0 : 1;
     }
 
