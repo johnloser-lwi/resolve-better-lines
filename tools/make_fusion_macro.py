@@ -23,6 +23,7 @@ import os
 OFX_ID   = "ofx.com.resolvebetterline.BetterLine"
 LINE     = "BLLine"      # inner OFX node
 SHADOW   = "BLShadow"    # inner Fusion Shadow node
+BG       = "BLCanvas"    # generator-only transparent canvas
 
 # (page, [(input id, label), ...]) on the OFX node.
 #
@@ -157,29 +158,38 @@ SHADOW_CONTROLS = [
 ]
 
 
-def main():
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    outdir = os.path.join(root, "fusion")
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "BetterLine.setting")
+def build(macro_name, background):
+    """Emit one .setting.
 
+    @param background  give the OFX node a comp-sized transparent canvas to draw
+                       on, instead of leaving its input for the user to connect.
+
+    An Edit-page GENERATOR has nothing upstream by definition, and an unconnected
+    input leaves the output size to the plugin's own region of definition. That
+    does now resolve to the project extent, but a Background with
+    UseFrameFormatSettings makes the canvas explicit rather than inferred -- the
+    size stops depending on a host negotiation the Edit page gives no way to
+    inspect. It defaults to fully transparent, so it adds nothing visible.
+    """
     L = []
     a = L.append
 
     a("{")
     a("\tTools = ordered() {")
-    a("\t\tBetterLine = GroupOperator {")
+    a("\t\t%s = GroupOperator {" % macro_name)
     a("\t\t\tCtrlWZoom = false,")
     a("\t\t\tNameSet = true,")
     a("\t\t\tInputs = ordered() {")
 
     # The image input first: Fusion treats MainInput1 as the node's primary
-    # connection, which is what puts the arrow on the left of the tile.
-    a('\t\t\t\tMainInput1 = InstanceInput {')
-    a('\t\t\t\t\tSourceOp = "%s",' % LINE)
-    a('\t\t\t\t\tSource = "Source",')
-    a('\t\t\t\t\tName = "Input",')
-    a('\t\t\t\t},')
+    # connection, which is what puts the arrow on the left of the tile. A
+    # generator has nothing upstream, so it exposes no image input at all.
+    if not background:
+        a('\t\t\t\tMainInput1 = InstanceInput {')
+        a('\t\t\t\t\tSourceOp = "%s",' % LINE)
+        a('\t\t\t\t\tSource = "Source",')
+        a('\t\t\t\t\tName = "Input",')
+        a('\t\t\t\t},')
 
     # No Default is emitted on any instance input, deliberately. An InstanceInput
     # carrying a Default OVERRIDES the value the plugin declared, so writing one
@@ -228,9 +238,35 @@ def main():
     a("\t\t\t},")
     a("\t\t\tTools = ordered() {")
 
+    if background:
+        a("\t\t\t\t%s = Background {" % BG)
+        a("\t\t\t\t\tCtrlWZoom = false,")
+        a("\t\t\t\t\tNameSet = true,")
+        a("\t\t\t\t\tInputs = {")
+        # 1 = follow the comp's frame format, so the canvas is the timeline's
+        # size. The Width/Height below are only the fallback Fusion falls back
+        # to if that setting is ever switched off.
+        a("\t\t\t\t\t\tUseFrameFormatSettings = Input { Value = 1, },")
+        a("\t\t\t\t\t\tWidth = Input { Value = 1920, },")
+        a("\t\t\t\t\t\tHeight = Input { Value = 1080, },")
+        a("\t\t\t\t\t\tTopLeftRed = Input { Value = 0, },")
+        a("\t\t\t\t\t\tTopLeftGreen = Input { Value = 0, },")
+        a("\t\t\t\t\t\tTopLeftBlue = Input { Value = 0, },")
+        a("\t\t\t\t\t\tTopLeftAlpha = Input { Value = 0, },")
+        a("\t\t\t\t\t},")
+        a("\t\t\t\t\tViewInfo = OperatorInfo { Pos = { -110, 0 } },")
+        a("\t\t\t\t},")
+
     a("\t\t\t\t%s = %s {" % (LINE, OFX_ID))
     a("\t\t\t\t\tCtrlWZoom = false,")
     a("\t\t\t\t\tNameSet = true,")
+    if background:
+        a("\t\t\t\t\tInputs = {")
+        a('\t\t\t\t\t\tSource = Input {')
+        a('\t\t\t\t\t\t\tSourceOp = "%s",' % BG)
+        a('\t\t\t\t\t\t\tSource = "Output",')
+        a("\t\t\t\t\t\t},")
+        a("\t\t\t\t\t},")
     a("\t\t\t\t\tViewInfo = OperatorInfo { Pos = { 0, 0 } },")
     a("\t\t\t\t},")
 
@@ -255,14 +291,35 @@ def main():
     a("\t\t},")
     a("\t},")
     a("}")
+    return "\n".join(L) + "\n"
 
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(L) + "\n")
-
-    total = 1 + sum(len(c) for _, c in PAGES) + len(SHADOW_CONTROLS)
+        f.write(text)
     print("wrote %s" % path)
-    print("  %d exposed inputs across %d pages + Shadow"
-          % (total, len(PAGES)))
+
+
+def main():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = os.path.join(root, "fusion")
+
+    # An Edit-page template and a Fusion macro are THE SAME FILE FORMAT -- only
+    # the folder decides which. Templates/Edit/Effects makes it a Fusion Effect
+    # on the Edit page, Templates/Edit/Generators makes it a Generator, and the
+    # Macros folder makes it a Fusion-page macro. Verified by reading a shipped
+    # generator template, which is a plain GroupOperator with no MediaIn or
+    # MediaOut of its own.
+    effect = build("BetterLine", background=False)
+    write(os.path.join(out, "BetterLine.setting"), effect)
+    write(os.path.join(out, "Edit", "Effects", "BetterLine.setting"), effect)
+
+    generator = build("BetterLineGenerator", background=True)
+    write(os.path.join(out, "Edit", "Generators", "BetterLine.setting"), generator)
+
+    total = sum(len(c) for _, c in PAGES) + len(SHADOW_CONTROLS)
+    print("  %d exposed controls across %d pages + Shadow" % (total, len(PAGES)))
 
 
 if __name__ == "__main__":
