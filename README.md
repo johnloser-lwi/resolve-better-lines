@@ -535,9 +535,28 @@ both survived until the generator was tried.
   background composites as solid black over everything beneath. That does not look like a
   premultiplication mistake — it looks like the plugin destroyed the timeline.
 
-Both are keyed on whether an input is actually **connected**, not on the context, so an
+The RoD is keyed on whether an input is actually **connected**, not on the context, so an
 effect-context instance sitting on an unconnected input gets the same treatment rather than
 inheriting the same empty union.
+
+### Premultiplication is declared unconditionally
+
+`setOutputPremultiplication(eImagePreMultiplied)` runs in **every** context, and that matters
+well beyond the generator.
+
+This effect produces alpha wherever it runs. It draws a line and leaves everything else as it
+found it, so on an **adjustment clip with nothing beneath it** the untouched pixels are
+transparent. Declare that opaque and the host ignores the alpha entirely: downstream sees
+alpha = 1 across the whole frame, so a drop shadow — or an outline, or anything else keying off
+a silhouette — has nothing to work from and quietly does nothing.
+
+Conditioning it on the input being *disconnected*, which an earlier version did, gets the
+adjustment-clip case exactly backwards. **Resolve hands an adjustment clip the composited
+layers below as a real, connected input.** So the guard was false precisely when it was needed,
+and the output inherited the timeline's opaque declaration.
+
+Unconditional is safe on ordinary footage: opaque is just the special case of premultiplied
+where alpha is 1, so any un-premultiply a downstream tool performs is the identity there.
 
 What else the context changes, and how little of it there was:
 

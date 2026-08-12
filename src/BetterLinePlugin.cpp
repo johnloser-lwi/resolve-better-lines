@@ -1180,20 +1180,30 @@ void BetterLinePlugin::getClipPreferences(OFX::ClipPreferencesSetter& p_ClipPref
 {
     p_ClipPreferences.setOutputFrameVarying(true);
 
-    // With no input to inherit from, the output's premultiplication defaults to
-    // OPAQUE -- and an opaque declaration tells the host to ignore the alpha we
-    // spent the whole render computing. The transparent background then composites
-    // as solid black over everything beneath it, which does not look like a
-    // premultiplication mistake; it looks like the plugin destroyed the timeline.
+    // ALWAYS premultiplied, whatever the input said.
+    //
+    // This effect produces alpha in every context it runs in. It draws a line and
+    // leaves everything else as it found it, so on an adjustment clip with nothing
+    // beneath it the untouched pixels are transparent -- and an opaque declaration
+    // tells the host to ignore that alpha entirely. Downstream then sees alpha = 1
+    // across the whole frame, so a drop shadow, an outline, or anything else that
+    // keys off a silhouette has nothing to work from and quietly does nothing.
+    //
+    // Conditioning this on the input being disconnected, which is what it used to
+    // do, gets the adjustment-clip case exactly backwards: Resolve hands an
+    // adjustment clip the composited layers below as a REAL connected input, so
+    // the guard was false precisely when it was needed and the output inherited
+    // the timeline's opaque declaration.
+    //
+    // Unconditional is also safe on ordinary footage. Opaque is just the special
+    // case of premultiplied where alpha is 1, so any un-premultiply a downstream
+    // tool performs is the identity there.
     //
     // The pixels really are premultiplied: the compositor scales all four channels
     // together, which is the same convention Resolve hands filters their input in.
-    if (!_srcClip || !_srcClip->isConnected())
-    {
-        p_ClipPreferences.setOutputPremultiplication(OFX::eImagePreMultiplied);
-        if (_dstClip)
-            p_ClipPreferences.setClipComponents(*_dstClip, OFX::ePixelComponentRGBA);
-    }
+    p_ClipPreferences.setOutputPremultiplication(OFX::eImagePreMultiplied);
+    if (_dstClip)
+        p_ClipPreferences.setClipComponents(*_dstClip, OFX::ePixelComponentRGBA);
 }
 
 /** @brief Supply a region of definition when there is no input to infer one from.
