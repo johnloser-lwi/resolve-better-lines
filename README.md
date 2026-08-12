@@ -575,6 +575,57 @@ If Resolve ignores the context, the honest workflow remains an **Adjustment Clip
 on a track with nothing beneath it and apply Better Line. That is the same thing a generator
 would give you, and it works today.
 
+## Motion blur
+
+Same principle as `resolve-multi-transform/src/MotionBlur.h`: **analytic, not temporal**. Every
+sample is the scene evaluated at a different fractional time, so no neighbouring frames are
+fetched and there is no dependence on the host's temporal clip access. That is only possible
+because the plugin owns its animation and can evaluate at any sub-frame time — the payoff for
+not relying on host keyframes. Midpoint sampling is lifted verbatim, including the reason:
+sampling at the interval *edges* double-weights the shutter's extremes and leaves faint hard
+lines at the head and tail of a fast move.
+
+**The cost profile is not the sibling's, and it drives the design.** Multi Transform's samples
+are cheap — each re-samples the same source image through a different matrix, so N samples is N
+texture fetches. This plugin *generates* geometry, so each sample is a full scene rebuild:
+evaluate points, flatten, trim, dash, emit primitives, bin the tile grid. Sixteen samples is
+sixteen of those.
+
+So **Adaptive Samples is load-bearing here**, not a refinement. A still frame collapses to one
+sample however high Samples is set, and that collapse applies even with Adaptive off — a fixed
+64-sample setting would otherwise pay 64 geometry rebuilds on a frame standing still. The
+default is **8** rather than the sibling's 16, but the ceiling is the same 64: a ceiling exists
+to bound the storage, not to enforce taste.
+
+Deciding the count costs **two** scene builds, comparing segment endpoints at the two shutter
+extremes. There is no cheaper proxy: unlike a transform, the thing that moves *is* the geometry,
+and it can move because a point is keyframed, the transform is animated, the trim is sweeping,
+or the wiggle has advanced. Two builds to avoid N is still a large saving whenever the answer is
+one — which for a static line it always is.
+
+### Averaging, not compositing
+
+The samples are **averaged**. Compositing N copies at 1/N opacity is a different and wrong
+operation: over-compositing gives `1-(1-a/N)^N`, so a solid line standing still would come out
+at **63%** opacity instead of 100%.
+
+- **GPU**: a device accumulator, one `AccumKernel` launch per sample adding weighted premultiplied
+  colour, then one `CompositeKernel` that composites the average over the source. `ShadePixel`
+  itself is untouched, which is what keeps parity provable. Each sample's buffers are freed as
+  its launch completes rather than holding all N resident — at 64 samples of a detailed import
+  that difference is the whole GPU memory budget.
+- **CPU**: the same average, but every scene stays resident, because a pixel gathers from all of
+  them rather than accumulating.
+- **One sample takes the un-blurred path**, on both. Not an optimisation: routing a single
+  sample through the accumulator would round-trip it through an extra buffer, and any float
+  difference that introduced would show as a parity failure on every still frame.
+
+The empty-tile column skip is dropped when blurring. A tile empty in one sample is exactly where
+another sample's line has moved to, so skipping per scene would punch holes in the blur.
+
+`cudatest` covers the accumulator with its own case — the other thirteen all run one sample and
+would pass regardless of whether the blur kernels worked at all.
+
 ## Presets
 
 Resolve gives OFX plugins no preset mechanism of its own, so this is one: **Save Preset**,

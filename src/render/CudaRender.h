@@ -60,4 +60,19 @@ bool CudaRenderLine(void* stream,
                     int x0, int y0, int x1, int y1,
                     const CudaSceneDesc& scene);
 
+/** @brief Motion-blurred render: average @p sceneCount shutter samples.
+ *
+ * Each scene is one evaluation of the whole geometry at a different fractional
+ * time, so this averages N genuinely different lines rather than smearing one.
+ *
+ * A count of 1 forwards to CudaRenderLine rather than running a one-sample
+ * average, so a frame that is not moving takes a byte-identical path to an
+ * un-blurred render.
+ */
+bool CudaRenderLineBlur(void* streamHandle,
+                        const float* srcDev, int srcRowStrideFloats,
+                        float*       dstDev, int dstRowStrideFloats,
+                        int x0, int y0, int x1, int y1,
+                        const CudaSceneDesc* scenes, int sceneCount);
+
 } // namespace bl

@@ -161,6 +161,14 @@ constexpr const char* kParamDashLen   = "dashLength";
 constexpr const char* kParamDashGap   = "dashGap";
 constexpr const char* kParamDashPhase = "dashPhase";
 
+// --- motion blur -------------------------------------------------------------
+constexpr const char* kParamBlurEnabled  = "motionBlur";
+constexpr const char* kParamShutterAngle = "shutterAngle";
+constexpr const char* kParamShutterPhase = "shutterPhase";
+constexpr const char* kParamBlurSamples  = "blurSamples";
+constexpr const char* kParamBlurAdaptive = "blurAdaptive";
+constexpr const char* kParamBlurDensity  = "blurPixelsPerSample";
+
 // --- animation ---------------------------------------------------------------
 // Two stages, In and Out, each a suffix on these.
 constexpr const char* kParamAnimEnable = "animate";

@@ -18,6 +18,7 @@
 #include "core/PathBlob.h"
 #include "core/PathBuild.h"
 #include "core/SvgPath.h"
+#include "core/MotionBlur.h"
 #include "core/Raster.h"
 #include "core/Shapes.h"
 #include "core/TileGrid.h"
@@ -95,8 +96,13 @@ public:
     void setSrcImg(OFX::Image* p_SrcImg) { _srcImg = p_SrcImg; }
     void setScene(const SceneView& p_Scene) { _scene = p_Scene; }
 
+    /// The shutter samples, when blurring. Null means the single-scene path,
+    /// which stays byte-for-byte what it was before motion blur existed.
+    void setBlurScenes(const std::vector<SceneView>* p_Scenes) { _blur = p_Scenes; }
+
 #ifdef BETTERLINE_HAVE_CUDA
     void setUpload(const CudaSceneDesc& p_Desc) { _upload = p_Desc; }
+    void setBlurUploads(const std::vector<CudaSceneDesc>* p) { _blurUploads = p; }
 
     /** @brief GPU path.
      *
@@ -122,8 +128,15 @@ public:
         const int srcStride = _srcImg
             ? static_cast<int>(_srcImg->getRowBytes() / sizeof(float)) : 0;
 
-        if (!dst || !CudaRenderLine(_pCudaStream, src, srcStride, dst, dstStride,
-                                    w.x1, w.y1, w.x2, w.y2, _upload))
+        const bool ok = (_blurUploads && _blurUploads->size() > 1)
+            ? CudaRenderLineBlur(_pCudaStream, src, srcStride, dst, dstStride,
+                                 w.x1, w.y1, w.x2, w.y2,
+                                 _blurUploads->data(),
+                                 static_cast<int>(_blurUploads->size()))
+            : CudaRenderLine(_pCudaStream, src, srcStride, dst, dstStride,
+                             w.x1, w.y1, w.x2, w.y2, _upload);
+
+        if (!dst || !ok)
         {
             bl::ProbeOnce("cudafail", "CUDA render failed; frames will be wrong");
             OFX::throwSuiteStatusException(kOfxStatFailed);
@@ -158,6 +171,43 @@ public:
 
             // Then shade only where something could be, skipping empty tiles a
             // whole column at a time rather than asking per pixel.
+            // Shutter samples are AVERAGED, then composited once.
+            //
+            // Kept as a separate loop rather than folded into the one below,
+            // because the empty-tile column skip does not survive N scenes: a
+            // tile empty in one sample is exactly where another sample's line
+            // has moved to. Skipping per scene would punch holes in the blur.
+            if (_blur && _blur->size() > 1)
+            {
+                const std::vector<SceneView>& scenes = *_blur;
+                const float weight = 1.0f / static_cast<float>(scenes.size());
+
+                for (int x = p_Window.x1; x < p_Window.x2; ++x)
+                {
+                    Premul acc;
+                    acc.r = acc.g = acc.b = acc.a = 0.0f;
+                    bool any = false;
+
+                    for (size_t k = 0; k < scenes.size(); ++k)
+                    {
+                        if (!scenes[k].AnythingAt(x, y)) continue;
+
+                        const Premul s = ShadePixel(scenes[k],
+                                                    static_cast<float>(x) + 0.5f,
+                                                    static_cast<float>(y) + 0.5f);
+                        acc.r += s.r * weight;
+                        acc.g += s.g * weight;
+                        acc.b += s.b * weight;
+                        acc.a += s.a * weight;
+                        any = true;
+                    }
+
+                    if (any && acc.a > 0.0f)
+                        Over(acc, dstRow + static_cast<ptrdiff_t>(x - p_Window.x1) * 4);
+                }
+                continue;
+            }
+
             for (int x = p_Window.x1; x < p_Window.x2; )
             {
                 if (!_scene.AnythingAt(x, y))
@@ -183,8 +233,10 @@ public:
 private:
     OFX::Image* _srcImg = nullptr;
     SceneView   _scene;
+    const std::vector<SceneView>* _blur = nullptr;
 #ifdef BETTERLINE_HAVE_CUDA
     CudaSceneDesc _upload;
+    const std::vector<CudaSceneDesc>* _blurUploads = nullptr;
 #endif
 };
 
@@ -245,6 +297,16 @@ private:
     OFX::DoubleParam*  _taperBody  = nullptr;
     OFX::DoubleParam*  _taperEnd   = nullptr;
     OFX::BooleanParam* _taperTrim  = nullptr;
+
+    OFX::BooleanParam* _blurOn      = nullptr;
+    OFX::DoubleParam*  _blurAngle   = nullptr;
+    OFX::DoubleParam*  _blurPhase   = nullptr;
+    OFX::IntParam*     _blurSamples = nullptr;
+    OFX::BooleanParam* _blurAdapt   = nullptr;
+    OFX::DoubleParam*  _blurDensity = nullptr;
+
+    BlurParams blurParamsAt(double t) const;
+    float      shutterMotionPx(double t, const OfxRectI& rod, double renderScale) const;
 
     OFX::BooleanParam* _outline      = nullptr;
     OFX::DoubleParam*  _outlineWidth = nullptr;
@@ -432,6 +494,13 @@ BetterLinePlugin::BetterLinePlugin(OfxImageEffectHandle p_Handle)
     _taperBody  = fetchDoubleParam(kParamTaperBody);
     _taperEnd   = fetchDoubleParam(kParamTaperEnd);
     _taperTrim  = fetchBooleanParam(kParamTaperTrim);
+
+    _blurOn      = fetchBooleanParam(kParamBlurEnabled);
+    _blurAngle   = fetchDoubleParam(kParamShutterAngle);
+    _blurPhase   = fetchDoubleParam(kParamShutterPhase);
+    _blurSamples = fetchIntParam(kParamBlurSamples);
+    _blurAdapt   = fetchBooleanParam(kParamBlurAdaptive);
+    _blurDensity = fetchDoubleParam(kParamBlurDensity);
 
     _outline      = fetchBooleanParam(kParamOutline);
     _outlineWidth = fetchDoubleParam(kParamOutlineWidth);
@@ -1356,6 +1425,70 @@ Stage BetterLinePlugin::stageAt(int i, double t) const
     return s;
 }
 
+BlurParams BetterLinePlugin::blurParamsAt(double t) const
+{
+    BlurParams b;
+    b.enabled      = BoolAt(_blurOn, t);
+    b.shutterAngle = static_cast<float>(DoubleAt(_blurAngle, t));
+    b.shutterPhase = static_cast<float>(DoubleAt(_blurPhase, t));
+    b.adaptive     = BoolAt(_blurAdapt, t);
+    b.pixelsPerSample = static_cast<float>(DoubleAt(_blurDensity, t));
+
+    int n = 8;
+    try { _blurSamples->getValueAtTime(t, n); } catch (...) {}
+    b.samples = n < 1 ? 1 : (n > kMaxBlurSamples ? kMaxBlurSamples : n);
+    return b;
+}
+
+/** @brief Greatest on-screen travel of anything drawn, across the shutter.
+ *
+ * Measured by building the geometry at the two shutter EXTREMES and comparing
+ * segment endpoints. Two builds is the honest price: unlike a transform plugin,
+ * where the same measurement is two matrix evaluations, there is no cheaper
+ * proxy here -- the thing that moves is the geometry itself, and it can move
+ * because a point is keyframed, because the transform is animated, because the
+ * trim is sweeping, or because the wiggle has advanced.
+ *
+ * Two builds to decide whether to do N is still a large saving whenever the
+ * answer is "one", which for a static line it always is.
+ */
+float BetterLinePlugin::shutterMotionPx(double t, const OfxRectI& rod,
+                                        double renderScale) const
+{
+    const BlurParams b = blurParamsAt(t);
+    if (!b.enabled || b.shutterAngle <= 1e-4f || b.samples <= 1) return 0.0f;
+
+    std::vector<Segment>  sa, sb;
+    std::vector<FillEdge> fa, fb;
+    std::vector<Style>    ya, yb;
+
+    const float t0 = BlurSampleTime(static_cast<float>(t), b, 0, 2);
+    const float t1 = BlurSampleTime(static_cast<float>(t), b, 1, 2);
+
+    const_cast<BetterLinePlugin*>(this)->buildScene(t0, rod, renderScale, sa, fa, ya);
+    const_cast<BetterLinePlugin*>(this)->buildScene(t1, rod, renderScale, sb, fb, yb);
+
+    // A change in the NUMBER of segments means the geometry restructured --
+    // a dash boundary crossed, a trim revealing a new span, a stroke switching
+    // on. Comparing endpoint-by-endpoint would then be comparing unrelated
+    // segments, so treat it as "definitely moving" and let the adaptive count
+    // settle it from the displacement of what does correspond.
+    const size_t n = sa.size() < sb.size() ? sa.size() : sb.size();
+    if (sa.size() != sb.size() && n == 0) return 1e9f;
+
+    float maxD = (sa.size() != sb.size()) ? 4.0f : 0.0f;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const Vec2 da = sb[i].a - sa[i].a;
+        const Vec2 db = sb[i].b - sa[i].b;
+        const float la = ::sqrtf(Dot(da, da));
+        const float lb = ::sqrtf(Dot(db, db));
+        if (la > maxD) maxD = la;
+        if (lb > maxD) maxD = lb;
+    }
+    return maxD;
+}
+
 void BetterLinePlugin::buildScene(double t, const OfxRectI& rod, double renderScale,
                                   std::vector<Segment>& segs, std::vector<FillEdge>& fill,
                                   std::vector<Style>& styles) const
@@ -1719,6 +1852,14 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
 
     const OfxRectI rod = dst->getBounds();
 
+    // How many shutter samples this frame actually earns. One means the whole
+    // blur machinery is bypassed and the render is bit-for-bit what it was
+    // before motion blur existed -- which is the property that lets the parity
+    // test keep covering the un-blurred path unchanged.
+    const BlurParams blur = blurParamsAt(p_Args.time);
+    const int nSamples = BlurSampleCount(
+        blur, shutterMotionPx(p_Args.time, rod, p_Args.renderScale.x));
+
     std::vector<Segment>  segs;
     std::vector<FillEdge> fill;
     std::vector<Style>    styles;
@@ -1759,10 +1900,71 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
     scene.styles     = styles.data();
     scene.styleCount = static_cast<int>(styles.size());
 
+    // The shutter samples. Sample 0 is NOT the scene built above: that one is at
+    // frame centre, while sample 0 sits at the shutter's leading edge. Reusing it
+    // would weight the centre twice and leave the blur subtly asymmetric.
+    //
+    // Storage is per sample and freed together at the end of the render, because
+    // the CPU path needs every scene resident at once -- a pixel averages all of
+    // them. (The GPU path frees each after its launch, which it can because it
+    // accumulates rather than gathering.)
+    std::vector<std::vector<Segment> >  blurSegs;
+    std::vector<std::vector<FillEdge> > blurFill;
+    std::vector<std::vector<Style> >    blurStyles;
+    std::vector<TileGrid>  blurGrids;
+    std::vector<BandGrid>  blurBands;
+    std::vector<SceneView> blurScenes;
+#ifdef BETTERLINE_HAVE_CUDA
+    std::vector<CudaSceneDesc> blurUploads;
+#endif
+
+    if (nSamples > 1)
+    {
+        blurSegs.resize(nSamples); blurFill.resize(nSamples); blurStyles.resize(nSamples);
+        blurGrids.resize(nSamples); blurBands.resize(nSamples);
+        blurScenes.resize(nSamples);
+
+        for (int k = 0; k < nSamples; ++k)
+        {
+            const double tk = BlurSampleTime(static_cast<float>(p_Args.time),
+                                             blur, k, nSamples);
+            buildScene(tk, rod, p_Args.renderScale.x,
+                       blurSegs[k], blurFill[k], blurStyles[k]);
+
+            // Reach is measured per sample rather than once from the centre
+            // scene: a glow radius or thickness animating across the shutter
+            // would otherwise bin one sample against another's footprint and
+            // slice its halo along tile boundaries.
+            float rk = 0.0f, fk = 0.0f;
+            for (const Style& sy : blurStyles[k])
+            { rk = std::max(rk, sy.MaxReach()); fk = std::max(fk, sy.feather); }
+
+            BuildTileGrid(blurSegs[k], rk + 1.0f,
+                          p_Args.renderWindow.x1, p_Args.renderWindow.y1,
+                          p_Args.renderWindow.x2, p_Args.renderWindow.y2, 16, blurGrids[k]);
+            BuildBandGrid(blurFill[k], fk + 1.0f,
+                          p_Args.renderWindow.y1, p_Args.renderWindow.y2, 16, blurBands[k]);
+
+            SceneView v;
+            v.segs       = blurSegs[k].empty() ? nullptr : blurSegs[k].data();
+            v.segCount   = static_cast<int>(blurSegs[k].size());
+            v.grid       = blurGrids[k].View();
+            v.fill       = blurFill[k].empty() ? nullptr : blurFill[k].data();
+            v.fillCount  = static_cast<int>(blurFill[k].size());
+            v.bands      = blurBands[k].View();
+            v.styles     = blurStyles[k].data();
+            v.styleCount = static_cast<int>(blurStyles[k].size());
+            blurScenes[k] = v;
+        }
+
+        bl::ProbeOnce("blur", "motion blur active");
+    }
+
     LineProcessor processor(*this);
     processor.setDstImg(dst.get());
     processor.setSrcImg(src.get());
     processor.setScene(scene);
+    processor.setBlurScenes(blurScenes.empty() ? nullptr : &blurScenes);
 
 #ifdef BETTERLINE_HAVE_CUDA
     CudaSceneDesc upload;
@@ -1783,6 +1985,33 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
     upload.styles         = styles.data();
     upload.styleCount     = static_cast<int>(styles.size());
     processor.setUpload(upload);
+
+    if (nSamples > 1)
+    {
+        blurUploads.resize(nSamples);
+        for (int k = 0; k < nSamples; ++k)
+        {
+            CudaSceneDesc u;
+            u.segs           = blurScenes[k].segs;
+            u.segCount       = blurScenes[k].segCount;
+            u.tileStart      = blurGrids[k].start.empty() ? nullptr : blurGrids[k].start.data();
+            u.tileStartCount = static_cast<int>(blurGrids[k].start.size());
+            u.tileItems      = blurGrids[k].items.empty() ? nullptr : blurGrids[k].items.data();
+            u.tileItemCount  = static_cast<int>(blurGrids[k].items.size());
+            u.gridMeta       = blurGrids[k].View();
+            u.fill           = blurScenes[k].fill;
+            u.fillCount      = blurScenes[k].fillCount;
+            u.bandStart      = blurBands[k].start.empty() ? nullptr : blurBands[k].start.data();
+            u.bandStartCount = static_cast<int>(blurBands[k].start.size());
+            u.bandItems      = blurBands[k].items.empty() ? nullptr : blurBands[k].items.data();
+            u.bandItemCount  = static_cast<int>(blurBands[k].items.size());
+            u.bandMeta       = blurBands[k].View();
+            u.styles         = blurStyles[k].data();
+            u.styleCount     = static_cast<int>(blurStyles[k].size());
+            blurUploads[k]   = u;
+        }
+        processor.setBlurUploads(&blurUploads);
+    }
 #endif
 
     processor.setGPURenderArgs(p_Args);
@@ -2640,6 +2869,49 @@ void DescribeInContextShared(OFX::ImageEffectDescriptor& p_Desc,
                    "start and end of the ramp meet at the path's start point and show "
                    "as a hard seam across a contour that has no edge there. "
                    "Ignored by open paths.", true);
+    }
+
+    // --- motion blur ---------------------------------------------------------
+    {
+        OFX::GroupParamDescriptor* g = DefineGroup(p_Desc, page, "blurGroup", "Motion Blur");
+
+        DefineBool(p_Desc, page, g, kParamBlurEnabled, "Motion Blur",
+                   "Averages the line over the shutter, evaluated at sub-frame times. "
+                   "Analytic rather than temporal: no neighbouring frames are fetched, "
+                   "which is only possible because the plugin owns its own animation.",
+                   false);
+        DefineDouble(p_Desc, page, g, kParamShutterAngle, "Shutter Angle",
+                     "Degrees. 180 is the film convention; 360 blurs across a whole "
+                     "frame. Zero disables the blur however many samples are set.",
+                     180.0, 0.0, 720.0, 0.0, 360.0);
+        DefineDouble(p_Desc, page, g, kParamShutterPhase, "Shutter Phase",
+                     "Degrees. 0 centres the shutter on the frame; negative opens it "
+                     "earlier.", 0.0, -360.0, 360.0, -180.0, 180.0);
+        {
+            OFX::IntParamDescriptor* p = p_Desc.defineIntParam(kParamBlurSamples);
+            p->setLabels("Samples", "Samples", "Samples");
+            // Each sample is a whole geometry rebuild here, not a texture fetch
+            // as it is in a transform plugin, so the default is deliberately
+            // lower than the sibling's 16. The ceiling is the sibling's 64 --
+            // a ceiling exists to bound the storage, not to enforce taste.
+            p->setHint("Shutter samples. Each one rebuilds the whole geometry, so this "
+                       "costs considerably more than the same number would in a "
+                       "transform effect. With Adaptive on this is an upper bound.");
+            p->setDefault(8);
+            p->setRange(1, kMaxBlurSamples);
+            p->setDisplayRange(1, kMaxBlurSamples);
+            p->setParent(*g);
+            AddParam(page, p);
+        }
+        DefineBool(p_Desc, page, g, kParamBlurAdaptive, "Adaptive Samples",
+                   "Scales the count with how far the line actually moves, so a still "
+                   "frame costs one sample however high Samples is set. Worth far more "
+                   "here than in a transform effect, because a wasted sample is a whole "
+                   "geometry rebuild.", true);
+        DefineDouble(p_Desc, page, g, kParamBlurDensity, "Pixels per Sample",
+                     "Adaptive density: roughly one sample per this much on-screen "
+                     "travel. Larger is cheaper and coarser.",
+                     2.0, 0.25, 32.0, 0.5, 8.0);
     }
 
     // --- dashes --------------------------------------------------------------

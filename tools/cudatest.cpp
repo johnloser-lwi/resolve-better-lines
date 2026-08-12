@@ -351,6 +351,116 @@ int main()
         }
     }
 
+    // --- motion blur -------------------------------------------------------
+    //
+    // The blur path is a DIFFERENT pair of kernels -- accumulate, then composite
+    // once -- rather than the single LineKernel every case above exercises. None
+    // of those would catch a fault in it, because they all run one sample.
+    {
+        const int kSamples = 4;
+
+        // Four translated copies of one stroke, standing in for four shutter
+        // times. What varies between samples does not matter to the accumulator;
+        // that they genuinely differ does.
+        std::vector<std::vector<Segment> >  segsN(kSamples);
+        std::vector<std::vector<FillEdge> > fillN(kSamples);
+        std::vector<TileGrid>  gridN(kSamples);
+        std::vector<BandGrid>  bandN(kSamples);
+        std::vector<SceneView> viewN(kSamples);
+        std::vector<CudaSceneDesc> upN(kSamples);
+
+        Style st;
+        st.halfWidth = 9.0f; st.feather = 1.2f;
+        st.color = Color(1.0f, 0.85f, 0.3f, 1.0f);
+
+        for (int k = 0; k < kSamples; ++k)
+        {
+            const float dx = static_cast<float>(k) * 11.0f;
+            Stroke sk;
+            sk.pts = { CP(40 + dx, 70, 70, 60), CP(150 + dx, 200, 50, 0),
+                       CP(215 + dx, 70, 0, -60) };
+
+            Polyline poly;
+            FlattenStroke(sk, 0.2f, poly);
+            TrimState trim;
+            BuildStrokeSegments(poly, st, trim, false, 0.0f, 0.0f, 0.0f, segsN[k]);
+
+            BuildTileGrid(segsN[k], st.MaxReach() + 1.0f, 0, 0, kSize, kSize, 16, gridN[k]);
+            BuildBandGrid(fillN[k], st.feather + 1.0f, 0, kSize, 16, bandN[k]);
+
+            SceneView v;
+            v.segs = segsN[k].empty() ? nullptr : segsN[k].data();
+            v.segCount = static_cast<int>(segsN[k].size());
+            v.grid = gridN[k].View();
+            v.fill = nullptr; v.fillCount = 0;
+            v.bands = bandN[k].View();
+            v.styles = &st; v.styleCount = 1;
+            viewN[k] = v;
+
+            CudaSceneDesc u;
+            u.segs = v.segs; u.segCount = v.segCount;
+            u.tileStart = gridN[k].start.empty() ? nullptr : gridN[k].start.data();
+            u.tileStartCount = static_cast<int>(gridN[k].start.size());
+            u.tileItems = gridN[k].items.empty() ? nullptr : gridN[k].items.data();
+            u.tileItemCount = static_cast<int>(gridN[k].items.size());
+            u.gridMeta = gridN[k].View();
+            u.fill = nullptr; u.fillCount = 0;
+            u.bandStart = bandN[k].start.empty() ? nullptr : bandN[k].start.data();
+            u.bandStartCount = static_cast<int>(bandN[k].start.size());
+            u.bandItems = bandN[k].items.empty() ? nullptr : bandN[k].items.data();
+            u.bandItemCount = static_cast<int>(bandN[k].items.size());
+            u.bandMeta = bandN[k].View();
+            u.styles = &st; u.styleCount = 1;
+            upN[k] = u;
+        }
+
+        std::vector<float> cpu(srcHost);
+        const float weight = 1.0f / static_cast<float>(kSamples);
+        for (int y = 0; y < kSize; ++y)
+            for (int x = 0; x < kSize; ++x)
+            {
+                Premul acc; acc.r = acc.g = acc.b = acc.a = 0.0f;
+                for (int k = 0; k < kSamples; ++k)
+                {
+                    const Premul s2 = ShadePixel(viewN[k],
+                                                 static_cast<float>(x) + 0.5f,
+                                                 static_cast<float>(y) + 0.5f);
+                    acc.r += s2.r * weight; acc.g += s2.g * weight;
+                    acc.b += s2.b * weight; acc.a += s2.a * weight;
+                }
+                if (acc.a > 0.0f)
+                    Over(acc, &cpu[(static_cast<size_t>(y) * kSize + x) * 4]);
+            }
+
+        cudaMemcpy(srcDev, srcHost.data(), bytes, cudaMemcpyHostToDevice);
+        if (!CudaRenderLineBlur(nullptr, srcDev, kSize * 4, dstDev, kSize * 4,
+                                0, 0, kSize, kSize, upN.data(), kSamples))
+        {
+            std::printf("  %-30s CUDA BLUR RENDER FAILED\n", "motion blur x4");
+            ++failures;
+        }
+        else
+        {
+            std::vector<float> gpu(pixels * 4);
+            cudaMemcpy(gpu.data(), dstDev, bytes, cudaMemcpyDeviceToHost);
+
+            double worst = 0.0; size_t bad = 0;
+            for (size_t i = 0; i < gpu.size(); ++i)
+            {
+                const double d = std::fabs(double(gpu[i]) - double(cpu[i]));
+                if (d > worst) worst = d;
+                if (d > kTol) ++bad;
+            }
+            const bool ok = (worst <= kTol) ||
+                            (double(bad) / double(gpu.size()) <= kMaxBadFraction &&
+                             worst <= kAbsCeiling);
+            std::printf("  %-30s segs=%4zu  maxdiff=%.3e  bad=%zu  %s\n",
+                        "motion blur x4", segsN[0].size(), worst, bad,
+                        ok ? "ok" : "DIVERGED");
+            if (!ok) ++failures;
+        }
+    }
+
     cudaFree(srcDev);
     cudaFree(dstDev);
 
