@@ -161,7 +161,7 @@ struct Style
     bool  shadow        = false;
     float shadowDx      = 0.0f;   ///< pixels
     float shadowDy      = 0.0f;
-    float shadowSoft    = 6.0f;   ///< pixels of falloff beyond the silhouette
+    float shadowSoft    = 6.0f;   ///< pixels; the blur's radius, CENTRED on the edge
     float shadowOpacity = 0.6f;
     Color shadowColor   = Color(0.0f, 0.0f, 0.0f, 1.0f);
 
@@ -231,6 +231,23 @@ struct Style
     /// the seam closes into itself and the only thing left is the gradient.
     bool  gradLoop  = false;
 
+    /** @brief Sigma of the drop shadow's blur kernel, in pixels.
+     *
+     * Softness is the blur's RADIUS, and a gaussian is spent by about two sigma,
+     * so sigma is half of it. That puts the visible falloff at roughly plus or
+     * minus the softness the user asked for -- half of it inside the silhouette,
+     * half outside, which is where a blur actually puts it.
+     *
+     * Floored at half the feather so a zero-softness shadow is still an
+     * ANTIALIASED hard copy. Without the floor the profile degenerates to a step
+     * and the shadow becomes the only edge in the frame not resolved sub-pixel:
+     * a crisp shadow is meant to look crisp, not to look jagged.
+     */
+    BL_HD float ShadowSigma() const
+    {
+        return Max(shadowSoft * 0.5f, Max(feather, 1.0f) * 0.5f);
+    }
+
     /** @brief Largest distance from the centreline at which this style still
      *         paints anything.
      *
@@ -251,8 +268,13 @@ struct Style
             // a whole offset away from itself. Binning it only by its own extent
             // would clip the shadow along tile boundaries -- the same failure as
             // an under-reported glow radius, just displaced.
+            //
+            // Reaching exactly as far as the profile is truncated, and no
+            // further: bin short of the cutoff and the tail is sliced off along
+            // a tile edge, bin past it and every tile carries primitives that
+            // cannot paint a thing.
             const float off = ::sqrtf(shadowDx * shadowDx + shadowDy * shadowDy);
-            r = Max(r, off + shadowSoft + feather);
+            r = Max(r, off + kBlurCutoffSigmas * ShadowSigma() + feather);
         }
         return r;
     }

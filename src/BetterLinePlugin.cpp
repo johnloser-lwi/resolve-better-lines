@@ -2802,7 +2802,11 @@ void DescribeInContextShared(OFX::ImageEffectDescriptor& p_Desc,
             AddParam(page, p);
         }
         DefineDouble(p_Desc, page, g, kParamShadowSoft, "Shadow Softness",
-                     "Percentage of frame height.", 0.5, 0.0, 100.0, 0.0, 5.0);
+                     "Blur radius, as a percentage of frame height. The falloff is "
+                     "centred on the shadow's edge the way a real blur is, so half of "
+                     "it sits inside the silhouette -- raise Shadow Opacity if a very "
+                     "soft shadow comes out lighter than you wanted.",
+                     0.5, 0.0, 100.0, 0.0, 5.0);
         DefineDouble(p_Desc, page, g, kParamShadowOpacity, "Shadow Opacity",
                      "", 0.6, 0.0, 1.0, 0.0, 1.0);
         DefineColor(p_Desc, page, g, kParamShadowColor, "Shadow Colour", 0.0, 0.0, 0.0, 1.0);

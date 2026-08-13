@@ -310,9 +310,29 @@ ramp, midpoint bias, taper and dashes.
 
 **The drop shadow costs one extra distance evaluation per segment**, in the same loop, at a
 displaced position — not a second pass over a blurred buffer. The tile grid expands each
-primitive by the offset magnitude plus softness, so a segment is binned into the tiles its
-*shadow* can reach; without that the shadow clips along tile boundaries, the same failure as
-an under-reported glow radius, just displaced.
+primitive by the offset magnitude plus the softness cutoff, so a segment is binned into the
+tiles its *shadow* can reach; without that the shadow clips along tile boundaries, the same
+failure as an under-reported glow radius, just displaced.
+
+The falloff is the profile of a **gaussian-blurred edge, centred on the silhouette** — the
+normal CDF, via its logistic approximation, since `erff` is not device code. Centring is the
+whole of it, and it was originally got wrong: measuring the softness purely *outward* from the
+silhouette keeps the interior at full opacity right up to the boundary, so whatever the
+softness the result is a solid offset copy of the line with a rim around it. No falloff
+through the body of the shadow, and a visible edge where the plateau ends.
+
+A real kernel is symmetric, so half of it lands either side of the boundary: the silhouette
+comes out at half coverage, the inside fades down to meet it, the outside fades away from it.
+That also gets thin shapes right for free — a hairline under a wide blur goes faint and broad,
+because no part of it is ever more than a fraction of a sigma from an edge, where the
+outward-only ramp kept its core at full strength however hard it was blurred.
+
+Softness is the blur's **radius**, and sigma is half of it, so the visible falloff spans about
+±softness. The profile is truncated at 3.5σ and the tile grid reaches exactly that far: bin
+short of the cutoff and the tail is sliced off along a tile edge; bin past it and every tile
+carries primitives that cannot paint anything. Sigma is floored at half the feather, so a
+zero-softness shadow is still an *antialiased* hard copy rather than the only edge in the
+frame not resolved sub-pixel.
 
 The exact analytic falloff for glow and feather, with no separable blur and no scratch
 buffer, is the main reason for choosing an SDF over a scanline rasterizer.

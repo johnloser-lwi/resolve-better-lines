@@ -345,8 +345,11 @@ std::vector<Case> MakeCases()
         c.style.shadowSoft = 10.0f; c.style.shadowOpacity = 0.75f;
         cases.push_back(c);
     }
-    // 19. hard shadow, zero softness: must be a crisp offset copy, not a shape
-    //     that has quietly shrunk by half the falloff.
+    // 19. hard shadow, zero softness: a CRISP offset copy, and crisp means
+    //     antialiased rather than stair-stepped. The blur sigma is floored at
+    //     half the feather for exactly this cell -- with no floor the profile
+    //     degenerates to a step and this is the only edge in the frame not
+    //     resolved sub-pixel.
     {
         Case c; c.name = "hard shadow + dashes";
         c.stroke.pts = { CP(40, 128, 60, -70), CP(216, 128, 60, 70) };
@@ -355,6 +358,20 @@ std::vector<Case> MakeCases()
         c.style.shadow = true; c.style.shadowDx = 7.0f; c.style.shadowDy = -7.0f;
         c.style.shadowSoft = 0.0f; c.style.shadowOpacity = 0.85f;
         c.dashLen = 20.0f; c.gapLen = 12.0f;
+        cases.push_back(c);
+    }
+    // 20. A HAIRLINE under a wide softness: the case that says whether the
+    //     falloff is a blur or a rim. Blurred, a line this thin has no part of
+    //     it more than a fraction of a sigma from an edge, so the shadow must
+    //     come out faint and broad. A solid dark core here means the profile has
+    //     gone back to being hung outside the silhouette.
+    {
+        Case c; c.name = "soft shadow, hairline";
+        c.stroke.pts = { CP(40, 70, 70, 60), CP(212, 180, 50, -60) };
+        c.style.halfWidth = 1.2f; c.style.feather = 1.0f;
+        c.style.color = Color(1.0f, 1.0f, 1.0f, 1.0f);
+        c.style.shadow = true; c.style.shadowDx = 10.0f; c.style.shadowDy = -10.0f;
+        c.style.shadowSoft = 26.0f; c.style.shadowOpacity = 0.85f;
         cases.push_back(c);
     }
 

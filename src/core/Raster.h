@@ -333,10 +333,17 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         // neighbour still belongs to the thing that threw it.
         const Style& ss = scene.StyleAt(shadowStyleIdx);
 
-        // Softness measured OUTWARD from the silhouette, so a zero-softness
-        // shadow is a hard offset copy rather than a shape that has quietly
-        // shrunk by half the falloff.
-        const float cov = 1.0f - SmoothStep(0.0f, Max(ss.shadowSoft, 1e-4f), ds);
+        // The profile of a BLURRED edge, centred on the silhouette -- not a ramp
+        // hung outside it.
+        //
+        // Measuring the softness purely outward, as this did, keeps the interior
+        // at full opacity right up to the boundary. However large the softness,
+        // what comes out is a solid offset copy of the line with a rim around
+        // it: no falloff through the body of the shadow, and a visible edge
+        // where the plateau ends. Centring the profile is what a blur does, and
+        // it is also what makes a thin line's shadow go faint and broad under a
+        // wide softness instead of staying a hard bright core.
+        const float cov = BlurredEdge(ds, ss.ShadowSigma());
         AccumulateOver(ss.shadowColor, cov * ss.shadowOpacity * ss.opacity, out);
     }
 

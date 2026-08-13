@@ -46,6 +46,45 @@ BL_HD inline float SmoothStep(float e0, float e1, float x)
     return t * t * (3.0f - 2.0f * t);
 }
 
+/** @brief Coverage of a GAUSSIAN-BLURRED edge at signed distance @p d.
+ *
+ * Not the same thing as a smoothstep hung off the edge, and the difference is
+ * the whole reason a distance-field drop shadow can look like a sticker rather
+ * than a shadow. A blur kernel is symmetric, so half of it lands either side of
+ * the boundary: the silhouette itself comes out at HALF coverage, the inside
+ * fades down to meet it, and the outside fades away from it. A ramp that starts
+ * at the silhouette and only travels outward leaves the interior at full opacity
+ * right up to the edge -- a solid copy with a rim around it, which is exactly
+ * how it reads.
+ *
+ * It also gets thin shapes right for free. A hairline under a wide blur should
+ * come out faint and broad, because no part of it is ever more than a fraction
+ * of a sigma from an edge; the outward-only ramp instead keeps its core at full
+ * strength however hard it is blurred, and that core is the "no falloff" look.
+ *
+ * The profile is the normal CDF via its logistic approximation, whose error
+ * peaks below 0.01 -- far under a single 8-bit code value once an opacity is
+ * applied. The alternative is erff(), which is not device code.
+ *
+ * Well-behaved at both extremes without a guard: a large positive @p d overflows
+ * expf to +inf and the reciprocal is 0, a large negative one underflows to 0 and
+ * the reciprocal is 1. Both are the right answer.
+ */
+BL_HD inline float BlurredEdge(float d, float sigma)
+{
+    if (sigma <= 1e-6f) return d < 0.0f ? 1.0f : 0.0f;
+    return 1.0f / (1.0f + ::expf(1.702f * d / sigma));
+}
+
+/// Where a BlurredEdge is truncated, in sigmas.
+///
+/// The kernel has infinite tails but the tile grid does not, so the profile is
+/// cut off wherever the binning stops caring -- and the two have to be the SAME
+/// number or the shadow steps at a tile boundary. 3.5 sigma leaves 0.0026
+/// coverage on the table, under a single 8-bit code value even at full opacity,
+/// which is what makes the cut invisible rather than merely small.
+constexpr float kBlurCutoffSigmas = 3.5f;
+
 struct Vec2
 {
     float x = 0.0f;
