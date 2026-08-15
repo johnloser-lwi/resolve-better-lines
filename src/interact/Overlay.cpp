@@ -1053,15 +1053,23 @@ bool BetterLineInteract::penDown(const OFX::PenArgs& args)
             const OfxPointD h1 = curveToCanonical(c, e.x1, e.y1);
             const OfxPointD h2 = curveToCanonical(c, e.x2, e.y2);
 
+            // The offset from the pen to the handle is kept, exactly as it is
+            // for a path point. The hit radius is twice the drawn disc, so
+            // without it every grab that was not dead centre snaps the handle
+            // under the cursor before the drag has moved a pixel -- and on a
+            // plot 200 units wide, those few pixels are several percent of the
+            // value being set.
             if (NearPoint(c, pen, h1, 9.0))
             {
                 _drag = kDragCurve1; _pressPos = pen; _dragMoved = false;
+                _grab = {h1.x - pen.x, h1.y - pen.y};
                 BeginEdit(_effect, "Easing Curve");
                 return true;
             }
             if (NearPoint(c, pen, h2, 9.0))
             {
                 _drag = kDragCurve2; _pressPos = pen; _dragMoved = false;
+                _grab = {h2.x - pen.x, h2.y - pen.y};
                 BeginEdit(_effect, "Easing Curve");
                 return true;
             }
@@ -1351,13 +1359,33 @@ bool BetterLineInteract::penMotion(const OFX::PenArgs& args)
     {
         try
         {
-            const OfxRectD r    = curveRect(c);
+            // curvePLOTrect, the same rect curveToCanonical draws the handles
+            // into -- not curveRect, the whole panel.
+            //
+            // This is the inverse of that mapping and has to use the identical
+            // rectangle or the handle lands somewhere other than where it was
+            // drawn. The panel is 200x200; the plot inside it is 184 wide (8 of
+            // padding each side) and 162 tall (8 of padding, 30 for the tab
+            // strip). Inverting against the panel therefore mis-scales BOTH
+            // axes and mis-places the origin, so the handle teleports on the
+            // first pixel of movement, before the drag has expressed anything.
+            //
+            // The two mappings happen to agree near the middle of x and near
+            // the BOTTOM of y, which is why this was survivable at all: the In
+            // handle rests around there and jumps by only a few percent. The
+            // Out handle rests at the top right, where the error is largest --
+            // at the defaults it jumped Overshoot from 0 to about -30% the
+            // instant it was touched.
+            const OfxRectD r    = curvePlotRect(c);
             const double   wpx  = r.x2 - r.x1;
             const double   hpx  = r.y2 - r.y1;
             if (wpx <= 0.0 || hpx <= 0.0) return false;
 
-            const float tx = static_cast<float>((args.penPosition.x - r.x1) / wpx);
-            const float vy = _curveLo + static_cast<float>((args.penPosition.y - r.y1) / hpx)
+            const double gx = args.penPosition.x + _grab.x;
+            const double gy = args.penPosition.y + _grab.y;
+
+            const float tx = static_cast<float>((gx - r.x1) / wpx);
+            const float vy = _curveLo + static_cast<float>((gy - r.y1) / hpx)
                                         * (_curveHi - _curveLo);
 
             writeCurveHandle(c.time, curveStage(c.time), _drag == kDragCurve2, tx, vy);

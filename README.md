@@ -977,6 +977,24 @@ Two rules carried from Multi Transform's version:
   only grow would stay zoomed out after one wild drag. The fit includes the handle positions so
   an off-curve handle stays grabbable.
 
+**The drag inverts against the plot rect, not the panel rect.** These are not the same
+rectangle — the panel is 200×200 screen units, and the plot inside it is 184 wide (8 of padding
+each side) and 162 tall (8 of padding, 30 for the tab strip). Inverting the pen position against
+the panel mis-scales both axes *and* mis-places the origin, so the handle teleports on the first
+pixel of movement, before the drag has expressed anything at all.
+
+That was the original bug, and its shape is worth recording because it looked like a quirk
+rather than an error. The two mappings agree near the middle of x and near the *bottom* of y,
+which is roughly where the In handle rests — so In jumped by about five points and read as
+slop. The Out handle rests at the top right, where the error is largest: at the defaults it
+threw `Overshoot` from 0 to −30% the instant it was touched, and on a back-out curve from 100
+to 54. One handle looking usable is what kept the other's misbehaviour looking like a handle
+quirk instead of a mapping that was simply wrong.
+
+**The grab offset is kept**, as it is for a path point. The hit radius is twice the drawn disc,
+so without it any grab that was not dead centre snaps the handle under the cursor before the
+drag begins — and on a plot this size those few pixels are several percent of the value.
+
 The panel is hit-tested before the path handles because it is drawn over them, and it swallows
 any click inside it so a miss near a handle does not fall through and start dragging a point
 behind it. When hidden it is skipped from hit-testing **entirely**, not merely not drawn.
