@@ -693,6 +693,16 @@ control characters and empty strings, and asserts that malformed input is reject
 
 *Not saved:* keyframe curves. A preset stores each parameter's current value.
 
+**The dialogs open in the preset folder, every time.** They are `IFileDialog` with `SetFolder`,
+lifted from `resolve-multi-transform`, which hit the wall first. The old `GetOpenFileName` took
+the folder through `lpstrInitialDir`, which has been advisory since Vista: Windows prefers the
+calling *executable's* last-visited-folder MRU — and that executable is Resolve, whose MRU is
+shared with every other dialog it opens. So Load Preset opened wherever Resolve had last
+browsed, and only sometimes in the preset folder. `SetFolder` states the folder outright
+(`SetDefaultFolder` would not — it is a suggestion the MRU overrides). The folder picker is the
+same dialog in folder mode, which also retires `SHBrowseForFolder`'s cramped tree with no
+address bar. A dialog that fails to appear is logged with its `HRESULT`; cancelling stays silent.
+
 ## Add Shape
 
 Rectangle, ellipse and regular polygon, written into a stroke slot as **ordinary control
@@ -714,6 +724,13 @@ placing and sizing a shape needs no per-shape controls at all.
 | **Corner Radius** | % of the shape's *inscribed* radius; ignored by Ellipse |
 | **Lock Width to Height** | Makes the shape a true square/circle/regular polygon whatever the frame's aspect. On by default; hides Width |
 | **Width**, **Height** | Each a % of *its own* axis of the frame — 100 spans the frame on that axis |
+| **Preview Shape** | Draws a ghost of the shape in the viewer, exactly where Add Shape would put it, with the control points it would write. Overlay-only: no pixels, no preset entry |
+
+The preview is built through the **same `ShapeExtents` and `MakeShape` calls the button runs**,
+fed the same controls, and mapped through the same transform as slot points. That is what makes
+it a preview rather than an illustration: what is ghosted is what gets written, under the
+current Transform, not where the shape would land at identity. It is drawn beneath the real
+strokes and never hit-tested, so a path sitting where the ghost is stays on top and grabbable.
 | **Into** | `Next Free` picks the first stroke that is switched off, so adding never overwrites work in progress |
 
 - **Corner Radius is measured against the inscribed radius**, the distance from the centre to
@@ -1305,6 +1322,23 @@ back onto the first visible frame. `probe.log` records the raw bounds, which int
 was chosen, and the resolved clip frame; a resolved frame far too large to be a frame within a
 clip is called out explicitly, because that state renders as an inert-looking effect rather
 than an error.
+
+### Set Start / End to Playhead
+
+Each stage has two buttons, as `resolve-text-animator` has them: **Set Start to Playhead** writes
+Start as the frame the playhead is parked on, and **Set End to Playhead** writes Start so that
+`Start + Duration` lands there. A stage's Start is a frame number in the stage's own timebase,
+and the one place anyone actually knows that number is with the playhead on it.
+
+The clip time is resolved through the **same `GetClipTiming` the render uses** — origin, offset
+and length included — so the frame written is the frame the renderer will read back. That is
+the whole of what makes the buttons work inside a Fusion comp, where the raw playhead value is
+the comp's time rather than the clip's: the conversion that makes the animation land is the
+conversion that makes the button land. The value is then converted into the stage's own
+anchor — frames from the head, negative frames from the tail, or a percentage of the clip — so
+it means the same thing whichever anchor is chosen. An anchor measured from the tail needs a
+length to measure from; without one the button says so rather than writing a number that means
+nothing.
 
 ### Adjustment clips, and why a stage can refuse to run
 

@@ -102,6 +102,7 @@ constexpr const char* kParamShapeSize   = "shapeSize";    ///< height
 constexpr const char* kParamShapeWidth  = "shapeWidth";
 constexpr const char* kParamShapeLink   = "shapeLinkWH";
 constexpr const char* kParamShapeSlot   = "shapeTarget";
+constexpr const char* kParamShapePreview = "shapePreview";   ///< overlay-only ghost of the shape
 constexpr const char* kParamShapeAdd    = "shapeAdd";
 
 // --- global transform --------------------------------------------------------
@@ -189,6 +190,8 @@ constexpr const char* kStageFrom     = "From";
 constexpr const char* kStageTo       = "To";
 constexpr const char* kStageStart    = "Start";
 constexpr const char* kStageDuration = "Duration";
+constexpr const char* kStageSetStart = "SetStart";   ///< button: Start <- playhead
+constexpr const char* kStageSetEnd   = "SetEnd";     ///< button: Start <- playhead - Duration
 constexpr const char* kStageAnchor   = "Anchor";
 constexpr const char* kStagePreset   = "Ease";
 constexpr const char* kStageEaseIn   = "EaseIn";

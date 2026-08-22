@@ -1198,6 +1198,56 @@ void BetterLinePlugin::changedParam(const OFX::InstanceChangedArgs& p_Args,
         if (p_ParamName == StrokeParam(kStrokeCount, s)) { syncVisibility(); return; }
     }
 
+    // The playhead buttons write Start directly, which is what Start means
+    // anyway. The clip time is resolved through the SAME GetClipTiming the
+    // render uses -- origin, offset and length included -- so the frame written
+    // is the frame the renderer will read back. That is the whole of what makes
+    // this work in Fusion: there p_Args.time is the comp's time, not the
+    // clip's, and the same conversion that makes the animation land makes the
+    // button land.
+    for (int i = 0; i < 2; ++i)
+    {
+        const bool out      = (i == 1);
+        const bool setStart = (p_ParamName == StageParam(kStageSetStart, out));
+        const bool setEnd   = (p_ParamName == StageParam(kStageSetEnd,   out));
+        if (!setStart && !setEnd) continue;
+
+        const double t = p_Args.time;
+        const ClipTiming ct = GetClipTiming(this, t,
+                                            ChoiceAt(_timeOrigin, t, 0, kOriginCount - 1),
+                                            DoubleAt(_timeOffset, t),
+                                            DoubleAt(_clipLength, t));
+
+        // Converted into the stage's OWN timebase, so the number lands on the
+        // playhead whichever anchor is chosen: frames from the head, negative
+        // frames from the tail, or a percentage of the clip. Anchors measured
+        // from the tail need a length to measure from, and without one the
+        // button says so rather than writing a number that means nothing.
+        Stage probe = stageAt(i, t);
+        // Checked on the length itself, not through StageUsable: that also fails
+        // for a DISABLED stage, and setting a start on a stage before enabling
+        // it is a perfectly normal order to do things in.
+        if (probe.anchor != kAnchorClipStart && !(ct.length > 1.0))
+        {
+            sendMessage(OFX::Message::eMessageError, "",
+                        "This stage is anchored to the clip's end, and the host reported no "
+                        "usable clip length to measure from. Set Clip Length by hand first.");
+            return;
+        }
+        probe.startFrame = 0.0f;
+        const float local = StageLocalTime(probe, static_cast<float>(ct.clipFrame),
+                                           static_cast<float>(ct.length));
+
+        double value = static_cast<double>(local);
+        if (setEnd) value -= DoubleAt(_stDuration[i], t);
+
+        {
+            bl::EditBlock block(this, setStart ? "Set Start to Playhead" : "Set End to Playhead");
+            _stStart[i]->setValue(value);
+        }
+        return;
+    }
+
     // Easing preset <-> the four curve controls, in both directions.
     for (int i = 0; i < 2; ++i)
     {
@@ -2567,6 +2617,21 @@ void DescribeInContextShared(OFX::ImageEffectDescriptor& p_Desc,
             p->setParent(*g);
             AddParamUI(page, p);
         }
+        // Overlay-only: it changes no pixels, so it goes through AddParamUI and
+        // neither invalidates the render cache nor lands in presets. The ghost
+        // is built by the overlay from the SAME ShapeExtents/MakeShape calls the
+        // button uses, so what is previewed is what gets written.
+        {
+            OFX::BooleanParamDescriptor* p = p_Desc.defineBooleanParam(kParamShapePreview);
+            p->setLabels("Preview Shape", "Preview Shape", "Preview Shape");
+            p->setHint("Draw a ghost of the shape in the viewer, exactly where Add Shape "
+                       "would put it, so Sides, Corner Radius, Width and Height can be "
+                       "dialled in before anything is written.");
+            p->setDefault(false);
+            p->setAnimates(false);
+            p->setParent(*g);
+            AddParamUI(page, p);
+        }
         {
             OFX::PushButtonParamDescriptor* p = p_Desc.definePushButtonParam(kParamShapeAdd);
             p->setLabels("Add Shape", "Add Shape", "Add Shape");
@@ -3050,6 +3115,35 @@ void DescribeInContextShared(OFX::ImageEffectDescriptor& p_Desc,
                          -100000.0, 100000.0, -60.0, 60.0);
             DefineDouble(p_Desc, page, g, StageParam(kStageDuration, isOut), tag + "Duration",
                          "Frames.", 24.0, 0.0, 100000.0, 0.0, 120.0);
+
+            // Playhead buttons, as resolve-text-animator has them. A stage's
+            // Start is a frame number in the stage's own timebase, and the one
+            // place anyone actually knows that number is with the playhead
+            // parked on it. These read the clip time exactly as render does,
+            // so the frame written is the frame the renderer will read back --
+            // which is what makes them work inside a Fusion comp, where the
+            // raw playhead value means something else again.
+            {
+                OFX::PushButtonParamDescriptor* p =
+                    p_Desc.definePushButtonParam(StageParam(kStageSetStart, isOut));
+                p->setLabels(tag + "Set Start to Playhead", tag + "Set Start",
+                             tag + "Set Start to Playhead");
+                p->setHint("Park the playhead where this stage should begin and click: "
+                           "Start is set to that frame, in whichever anchor is chosen. "
+                           "Works the same on the Edit page and inside a Fusion comp.");
+                p->setParent(*g);
+                AddParamUI(page, p);   // holds no value; the Start it writes carries the cache rule
+            }
+            {
+                OFX::PushButtonParamDescriptor* p =
+                    p_Desc.definePushButtonParam(StageParam(kStageSetEnd, isOut));
+                p->setLabels(tag + "Set End to Playhead", tag + "Set End",
+                             tag + "Set End to Playhead");
+                p->setHint("Park the playhead where this stage should finish and click: "
+                           "Start is set so that Start + Duration lands on that frame.");
+                p->setParent(*g);
+                AddParamUI(page, p);
+            }
 
             {
                 OFX::ChoiceParamDescriptor* p =

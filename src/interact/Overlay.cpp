@@ -7,6 +7,7 @@
 #include "core/Easing.h"
 #include "core/Geometry.h"
 #include "core/PathBlob.h"
+#include "core/Shapes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -166,6 +167,19 @@ private:
     double    _xfPressAngle = 0.0, _xfPressDist = 1.0;
 
     OFX::BooleanParam* _showCurve  = nullptr;
+
+    // --- shape preview -------------------------------------------------------
+    // Read-only here: the overlay draws what Add Shape WOULD write, and the
+    // plugin owns the writing.
+    void drawShapePreview(const OverlayContext& c);
+
+    OFX::BooleanParam* _shapePreview = nullptr;
+    OFX::ChoiceParam*  _shapeKind    = nullptr;
+    OFX::IntParam*     _shapeSides   = nullptr;
+    OFX::DoubleParam*  _shapeCorner  = nullptr;
+    OFX::DoubleParam*  _shapeSize    = nullptr;
+    OFX::DoubleParam*  _shapeWidth   = nullptr;
+    OFX::BooleanParam* _shapeLink    = nullptr;
     OFX::ChoiceParam*  _curveStage = nullptr;
     OFX::DoubleParam*  _easeIn[2]  = {};
     OFX::DoubleParam*  _easeOut[2] = {};
@@ -263,6 +277,14 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
         _importShow = _effect->fetchBooleanParam(kParamImportShow);
         _pathBlob   = _effect->fetchStringParam(kParamPathBlob);
 
+        _shapePreview = _effect->fetchBooleanParam(kParamShapePreview);
+        _shapeKind    = _effect->fetchChoiceParam(kParamShapeKind);
+        _shapeSides   = _effect->fetchIntParam(kParamShapeSides);
+        _shapeCorner  = _effect->fetchDoubleParam(kParamShapeCorner);
+        _shapeSize    = _effect->fetchDoubleParam(kParamShapeSize);
+        _shapeWidth   = _effect->fetchDoubleParam(kParamShapeWidth);
+        _shapeLink    = _effect->fetchBooleanParam(kParamShapeLink);
+
         _showCurve  = _effect->fetchBooleanParam(kParamShowCurve);
         _curveStage = _effect->fetchChoiceParam(kParamCurveStage);
         for (int i = 0; i < 2; ++i)
@@ -298,6 +320,16 @@ BetterLineInteract::BetterLineInteract(OfxInteractHandle p_Handle,
         // moves the plotted curve immediately rather than on the next refresh.
         // Twelve watchers, not two hundred -- worth it here.
         addParamToSlaveTo(_showCurve);
+
+        // The ghost has to follow the dials as they turn, or it is a picture of
+        // the previous value -- worse than no preview, because it looks right.
+        addParamToSlaveTo(_shapePreview);
+        addParamToSlaveTo(_shapeKind);
+        addParamToSlaveTo(_shapeSides);
+        addParamToSlaveTo(_shapeCorner);
+        addParamToSlaveTo(_shapeSize);
+        addParamToSlaveTo(_shapeWidth);
+        addParamToSlaveTo(_shapeLink);
         addParamToSlaveTo(_curveStage);
         for (int i = 0; i < 2; ++i)
         {
@@ -868,6 +900,92 @@ void BetterLineInteract::writeCurveHandle(double t, int i, bool second,
     (void)t;
 }
 
+// --- shape preview -----------------------------------------------------------
+
+/** Ghost of the shape Add Shape would write, built through the SAME calls.
+ *
+ * ShapeExtents and MakeShape are what the button runs; calling them here with
+ * the same inputs is what makes this a preview rather than an illustration.
+ * The output is control points in the slot's normalised units, so they go
+ * through toCanonical and the transform exactly as slot points do -- which is
+ * also why the ghost lands where the written shape will land under the current
+ * Transform, rather than where it would land at identity.
+ */
+void BetterLineInteract::drawShapePreview(const OverlayContext& c)
+{
+    bool on = false;
+    if (_shapePreview) _shapePreview->getValueAtTime(c.time, on);
+    if (!on || !_shapeKind || !_shapeSides || !_shapeCorner ||
+        !_shapeSize || !_shapeWidth || !_shapeLink) return;
+
+    int    kind = kShapeRectangle, sides = 6;
+    double corner = 0.0, sizePct = 40.0, widthPct = 40.0;
+    bool   linkWH = true;
+    _shapeKind->getValueAtTime(c.time, kind);
+    _shapeSides->getValueAtTime(c.time, sides);
+    _shapeCorner->getValueAtTime(c.time, corner);
+    _shapeSize->getValueAtTime(c.time, sizePct);
+    _shapeWidth->getValueAtTime(c.time, widthPct);
+    _shapeLink->getValueAtTime(c.time, linkWH);
+    kind = kind < kShapeRectangle ? kShapeRectangle : (kind > kShapePolygon ? kShapePolygon : kind);
+
+    // The button refuses a polygon that will not fit; the ghost shows the
+    // largest one that will, which is also what syncVisibility clamps the
+    // slider to, so the two never disagree.
+    const bool rounded  = (kind != kShapeEllipse) && (corner > 0.01);
+    const int  maxSides = MaxSidesFor(kMaxPoints, rounded);
+    if (sides < 3) sides = 3;
+    if (sides > maxSides) sides = maxSides;
+
+    const double w = c.rod.x2 - c.rod.x1;
+    const double h = c.rod.y2 - c.rod.y1;
+    if (w <= 0.0 || h <= 0.0) return;
+    const float aspect = static_cast<float>(w / h);
+
+    float halfW = 0.0f, halfH = 0.0f;
+    ShapeExtents(widthPct, sizePct, linkWH, aspect, halfW, halfH);
+
+    std::vector<ControlPoint> pts;
+    MakeShape(kind, sides, static_cast<float>(corner) * 0.01f,
+              0.5f, 0.5f, halfW, halfH, aspect, pts);
+    if (pts.size() < 3) return;
+    if (pts.size() > static_cast<size_t>(kMaxPoints)) pts.resize(static_cast<size_t>(kMaxPoints));
+
+    Stroke stroke;
+    stroke.closed = true;
+    stroke.pts.reserve(pts.size());
+    for (const ControlPoint& in : pts)
+    {
+        const OfxPointD p = c.toCanonical(in.pos.x, in.pos.y);
+        const OfxPointD d = c.offsetToCanonical(in.tan.x, in.tan.y);
+        ControlPoint cp;
+        cp.pos = c.xform.Apply(Vec2(static_cast<float>(p.x), static_cast<float>(p.y)));
+        cp.tan = c.xform.ApplyVector(Vec2(static_cast<float>(d.x), static_cast<float>(d.y)));
+        stroke.pts.push_back(cp);
+    }
+
+    const float tol = Max(static_cast<float>(c.sx(0.5)), 0.05f);
+    FlattenStroke(stroke, tol, _poly);
+    if (_poly.pts.size() < 2) return;
+
+    _screen.clear();
+    _screen.reserve(_poly.pts.size());
+    for (const Vec2& v : _poly.pts) _screen.push_back({v.x, v.y});
+
+    // A different hue from the path guide, and translucent, so it reads as
+    // "proposed" next to a real stroke rather than as a second real stroke.
+    SetLineWidth(c, 1.5f);
+    SetColour(c, 0.45f, 0.95f, 0.55f, 0.65f);
+    DrawPrim(c, kOfxDrawPrimitiveLineLoop, _screen.data(), static_cast<int>(_screen.size()));
+
+    // Where the control points will land -- the thing you cannot see from the
+    // outline alone, and the thing that decides whether the shape is editable
+    // afterwards in the way you expect.
+    SetColour(c, 0.45f, 0.95f, 0.55f, 0.85f);
+    for (const ControlPoint& cp : stroke.pts)
+        DrawDisc(c, {cp.pos.x, cp.pos.y}, 2.5);
+}
+
 // --- draw --------------------------------------------------------------------
 
 bool BetterLineInteract::draw(const OFX::DrawArgs& args)
@@ -880,6 +998,10 @@ bool BetterLineInteract::draw(const OFX::DrawArgs& args)
 
     try
     {
+        // Beneath the real strokes, so a path sitting where the ghost is stays
+        // on top and grabbable. The ghost itself is never hit-tested.
+        drawShapePreview(c);
+
         const int strokes = strokeCount(c.time);
 
         for (int s = 0; s < strokes; ++s)
