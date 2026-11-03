@@ -1,89 +1,57 @@
 #include "PresetIO.h"
 
-#include "HostProbe.h"
 #include "Preset.h"
+#include "platform/Platform.h"
 
-#include <windows.h>
-#include <shlobj.h>
-#include <shobjidl.h>
-
-#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <string>
+
+// Shared by Windows and macOS. Everything that differs between them -- where
+// the user's folders are, how a directory is made, the native dialogs -- is in
+// platform/, so this file holds only the policy: which folder, which file,
+// what falls back to what.
 
 namespace bl {
 
 namespace {
 
-// IFileDialog is a wide-character API and the rest of this plugin is UTF-8.
-std::wstring Widen(const std::string& s)
-{
-    if (s.empty()) return std::wstring();
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &w[0], n);
-    return w;
-}
-
-std::string Narrow(const std::wstring& w)
-{
-    if (w.empty()) return std::string();
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
-                                      nullptr, 0, nullptr, nullptr);
-    std::string s(static_cast<size_t>(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &s[0], n, nullptr, nullptr);
-    return s;
-}
-
 /** Create a directory and every parent it needs. */
 bool EnsureFolder(const std::string& path)
 {
     if (path.empty()) return false;
-    if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+    if (platform::DirectoryExists(path)) return true;
 
     const size_t cut = path.find_last_of("\\/");
-    if (cut != std::string::npos && cut > 2) EnsureFolder(path.substr(0, cut));
-
-    return CreateDirectoryA(path.c_str(), nullptr) != 0 ||
-           GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
-bool FolderExists(const std::string& path)
-{
-    if (path.empty()) return false;
-    const DWORD a = GetFileAttributesA(path.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-std::string KnownFolder(int csidl)
-{
-    char buf[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, csidl, nullptr, 0, buf))) return buf;
-    return std::string();
+    if (cut != std::string::npos && cut > 0)
+    {
+        const std::string parent = path.substr(0, cut);
+        // Stop at a drive root ("C:"), which cannot be created and always
+        // exists if anything under it can.
+        const bool driveRoot = parent.size() == 2 && parent[1] == ':';
+        if (!driveRoot) EnsureFolder(parent);
+    }
+    return platform::MakeDirectory(path);
 }
 
 } // namespace
 
 std::string DefaultPresetFolder()
 {
-    std::string base = KnownFolder(CSIDL_PERSONAL);          // Documents
-    if (base.empty()) base = KnownFolder(CSIDL_LOCAL_APPDATA);
+    std::string base = platform::DocumentsFolder();
+    if (base.empty()) base = platform::AppDataFolder();
     if (base.empty()) return std::string();
 
-    const std::string dir = base + "\\BetterLine\\Presets";
+    const std::string dir = JoinPath(JoinPath(base, "BetterLine"), "Presets");
     EnsureFolder(dir);
     return dir;
 }
 
 std::string SettingsFilePath()
 {
-    const std::string base = KnownFolder(CSIDL_LOCAL_APPDATA);
-    if (base.empty()) return std::string();
-
-    const std::string dir = base + "\\BetterLine";
-    EnsureFolder(dir);
-    return dir + "\\settings.json";
+    const std::string dir = platform::AppDataFolder();
+    if (dir.empty()) return std::string();
+    return JoinPath(dir, "settings.json");
 }
 
 std::string LoadPresetFolderSetting()
@@ -111,7 +79,7 @@ bool SavePresetFolderSetting(const std::string& folder, std::string& error)
 std::string PresetFolder()
 {
     const std::string configured = LoadPresetFolderSetting();
-    if (!configured.empty() && FolderExists(configured)) return configured;
+    if (!configured.empty() && platform::DirectoryExists(configured)) return configured;
     return DefaultPresetFolder();
 }
 
@@ -121,140 +89,26 @@ std::string PresetFolder()
 // Every one of these pumps a modal message loop, which is why none of them may
 // be called from inside an OFX parameter edit block: the host would be left
 // holding an open block while an unbounded amount of other work ran through its
-// own event loop.
+// own event loop. The dialogs themselves are platform::RunFileDialog -- see
+// PlatformWin.cpp for why Windows needs IFileDialog::SetFolder to open in the
+// preset folder at all.
 // =============================================================================
-
-namespace {
-
-/** @brief One IFileDialog for all three pickers, started IN the preset folder.
- *
- * Deliberately not GetOpenFileName/GetSaveFileName, and this is lifted from
- * resolve-multi-transform, which hit the same wall first.
- *
- * `lpstrInitialDir` has only been advisory since Vista: Windows prefers the
- * calling EXECUTABLE's last-visited-folder MRU, and that executable is Resolve,
- * whose MRU is shared with every other dialog it opens. So Load Preset opened
- * wherever Resolve last browsed to -- an export folder, a media folder -- and
- * only sometimes in the preset folder, which is exactly how it was reported.
- * The old workaround of smuggling the directory in through `lpstrFile` beats
- * the MRU and then breaks Open outright: with OFN_FILEMUSTEXIST the dialog
- * validates that string as a FILE name, finds a path ending in a backslash,
- * and returns FALSE before it ever appears.
- *
- * IFileDialog has SetFolder, so the folder can simply be stated. SetFolder,
- * not SetDefaultFolder: the latter is a suggestion the last-visited folder
- * overrides, which is the trap above all over again. In folder-pick mode it
- * also replaces SHBrowseForFolder, whose cramped tree has no address bar and
- * no way to paste a path.
- *
- * The host's UI thread is already COM-initialised, but this must not assume
- * it: initialise, tolerate a different existing mode, and only uninitialise if
- * this call is what initialised it.
- */
-enum DialogMode { kDlgOpen, kDlgSave, kDlgFolder };
-
-bool RunFileDialog(DialogMode mode, const std::string& folder,
-                   const std::string& suggestedName, std::string& outPath)
-{
-    const HRESULT coInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    const bool weInitialised = SUCCEEDED(coInit);
-
-    bool ok = false;
-    IFileDialog* dialog = nullptr;
-
-    HRESULT hr = CoCreateInstance(mode == kDlgSave ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
-                                  nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
-    if (SUCCEEDED(hr))
-    {
-        DWORD flags = 0;
-        if (SUCCEEDED(dialog->GetOptions(&flags)))
-        {
-            flags |= FOS_FORCEFILESYSTEM;
-            switch (mode)
-            {
-                case kDlgOpen:   flags |= FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST; break;
-                case kDlgSave:   flags |= FOS_OVERWRITEPROMPT;                   break;
-                case kDlgFolder: flags |= FOS_PICKFOLDERS | FOS_PATHMUSTEXIST;   break;
-            }
-            dialog->SetOptions(flags);
-        }
-
-        if (mode != kDlgFolder)
-        {
-            static const COMDLG_FILTERSPEC kFilter[] = {
-                { L"Better Line preset (*.json)", L"*.json" },
-                { L"All files (*.*)",             L"*.*"    }
-            };
-            dialog->SetFileTypes(2, kFilter);
-            dialog->SetDefaultExtension(L"json");
-        }
-        dialog->SetTitle(mode == kDlgSave   ? L"Save Better Line Preset"
-                       : mode == kDlgOpen   ? L"Load Better Line Preset"
-                                            : L"Choose a folder for Better Line presets");
-
-        if (!folder.empty())
-        {
-            IShellItem* start = nullptr;
-            if (SUCCEEDED(SHCreateItemFromParsingName(Widen(folder).c_str(), nullptr,
-                                                      IID_PPV_ARGS(&start))))
-            {
-                dialog->SetFolder(start);
-                start->Release();
-            }
-        }
-
-        if (mode == kDlgSave && !suggestedName.empty())
-            dialog->SetFileName(Widen(suggestedName).c_str());
-
-        hr = dialog->Show(GetActiveWindow());
-        if (SUCCEEDED(hr))
-        {
-            IShellItem* picked = nullptr;
-            if (SUCCEEDED(dialog->GetResult(&picked)))
-            {
-                PWSTR wide = nullptr;
-                if (SUCCEEDED(picked->GetDisplayName(SIGDN_FILESYSPATH, &wide)) && wide)
-                {
-                    outPath = Narrow(wide);
-                    ok = !outPath.empty();
-                    CoTaskMemFree(wide);
-                }
-                picked->Release();
-            }
-        }
-        dialog->Release();
-    }
-
-    if (weInitialised) CoUninitialize();
-
-    // Cancelling is not a failure and must stay silent. Anything else is a
-    // dialog that refused to appear -- precisely the failure that went
-    // unnoticed with the old API -- so it is recorded rather than swallowed.
-    if (!ok && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED))
-    {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
-        ProbeLog(std::string("preset dialog failed: hr=") + buf);
-    }
-    return ok;
-}
-
-} // namespace
 
 bool ChooseFolder(const std::string& current, std::string& outPath)
 {
-    return RunFileDialog(kDlgFolder, current, std::string(), outPath);
+    return platform::RunFileDialog(platform::kDialogFolder, current, std::string(), outPath);
 }
 
 bool ChoosePresetToOpen(const std::string& folder, std::string& outPath)
 {
-    return RunFileDialog(kDlgOpen, folder, std::string(), outPath);
+    return platform::RunFileDialog(platform::kDialogOpen, folder, std::string(), outPath);
 }
 
 bool ChoosePresetToSave(const std::string& folder, const std::string& suggestedName,
                         std::string& outPath)
 {
-    return RunFileDialog(kDlgSave, folder, SanitiseFileName(suggestedName), outPath);
+    return platform::RunFileDialog(platform::kDialogSave, folder,
+                                   SanitiseFileName(suggestedName), outPath);
 }
 
 // =============================================================================

@@ -4,7 +4,9 @@
 
 namespace bl {
 
-/** @brief Append a line to the probe log (%LOCALAPPDATA%\BetterLine\probe.log).
+/** @brief Append a line to the probe log: probe.log in platform::AppDataFolder(),
+ *         %LOCALAPPDATA%\BetterLine on Windows and ~/Library/Application
+ *         Support/BetterLine on macOS.
  *
  * Deliberately cheap and fire-and-forget: opens, appends, closes. The log is a
  * development aid for establishing what the host actually supports, since the

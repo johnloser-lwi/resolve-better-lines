@@ -1,0 +1,4 @@
+# Shell scripts run on macOS, where a CRLF shebang fails as "bad interpreter:
+# /bin/bash^M" before a single line runs. Everything else in this repo is CRLF
+# by convention and is untouched by this file.
+*.sh text eol=lf

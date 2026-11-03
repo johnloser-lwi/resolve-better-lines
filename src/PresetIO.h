@@ -2,9 +2,10 @@
 
 // Where preset files live, and the dialogs that find them.
 //
-// Separated from Preset.cpp because everything here is Win32 and none of it is
-// testable without a desktop -- keeping the schema and the parser free of that
-// is what lets them be exercised offline.
+// Separated from Preset.cpp because everything here needs an OS -- folders,
+// dialogs -- and none of it is testable without a desktop. Keeping the schema
+// and the parser free of that is what lets them be exercised offline. The OS
+// calls themselves are in platform/, so this is shared Windows/macOS code.
 
 #include <string>
 #include <vector>
@@ -22,14 +23,17 @@ std::string PresetFolder();
 
 /** @brief Built-in default, created on demand.
  *
- * `Documents\BetterLine\Presets` -- somewhere the user can browse to, copy from
- * and back up. Falls back to LocalAppData only if Documents cannot be resolved.
+ * `Documents/BetterLine/Presets` -- somewhere the user can browse to, copy from
+ * and back up. Falls back to the app-data folder only if Documents cannot be
+ * resolved.
  */
 std::string DefaultPresetFolder();
 
-/** @brief Preferences file, `%LOCALAPPDATA%\BetterLine\settings.json`.
+/** @brief Preferences file, `settings.json` in platform::AppDataFolder() --
+ *         `%LOCALAPPDATA%\BetterLine` on Windows, `~/Library/Application
+ *         Support/BetterLine` on macOS.
  *
- * Stays in LocalAppData even though presets live in Documents: "where my presets
+ * Stays in app data even though presets live in Documents: "where my presets
  * are" is per-machine bookkeeping, not something to browse or share.
  *
  * It cannot be an OFX parameter. A parameter lives inside the PROJECT, so it

@@ -1,8 +1,8 @@
 #include "HostProbe.h"
 
-#include <windows.h>
-#include <shlobj.h>
+#include "platform/Platform.h"
 
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -22,14 +22,8 @@ bool g_hostDumped = false;
 
 std::string LogDir()
 {
-    char path[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path)))
-    {
-        std::string dir = std::string(path) + "\\BetterLine";
-        CreateDirectoryA(dir.c_str(), nullptr);
-        return dir;
-    }
-    return ".";
+    const std::string dir = platform::AppDataFolder();
+    return dir.empty() ? std::string(".") : dir;
 }
 
 const char* YesNo(bool b) { return b ? "yes" : "NO"; }
@@ -38,7 +32,7 @@ const char* YesNo(bool b) { return b ? "yes" : "NO"; }
 
 std::string ProbeLogPath()
 {
-    static const std::string p = LogDir() + "\\probe.log";
+    static const std::string p = JoinPath(LogDir(), "probe.log");
     return p;
 }
 
@@ -48,11 +42,7 @@ void ProbeLog(const std::string& line)
     std::ofstream f(ProbeLogPath(), std::ios::app);
     if (!f) return;
 
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    char stamp[32];
-    sprintf_s(stamp, "%02d:%02d:%02d.%03d ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    f << stamp << line << "\n";
+    f << platform::LogTimestamp() << line << "\n";
 }
 
 void ProbeOnce(const std::string& key, const std::string& line)
@@ -104,21 +94,19 @@ void ProbeTiming(const char* what, double ms)
     ProbeLog(line);
 }
 
+// steady_clock rather than QueryPerformanceCounter: the same monotonic,
+// high-resolution clock on both platforms, with no OS call of its own.
 ProbeScope::ProbeScope(const char* what) : _what(what)
 {
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    _start = c.QuadPart;
+    _start = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 ProbeScope::~ProbeScope()
 {
-    LARGE_INTEGER c, f;
-    QueryPerformanceCounter(&c);
-    QueryPerformanceFrequency(&f);
-    if (f.QuadPart == 0) return;
-    ProbeTiming(_what, 1000.0 * static_cast<double>(c.QuadPart - _start)
-                              / static_cast<double>(f.QuadPart));
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch()).count();
+    ProbeTiming(_what, static_cast<double>(now - _start) / 1.0e6);
 }
 
 void ProbeHostOnce()
