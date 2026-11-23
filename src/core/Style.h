@@ -20,7 +20,7 @@ struct Color
     BL_HD Color(float cr, float cg, float cb, float ca) : r(cr), g(cg), b(cb), a(ca) {}
 };
 
-BL_HD inline Color LerpColor(const Color& x, const Color& y, float t)
+BL_HD inline Color LerpColor(const BL_THREAD Color& x, const BL_THREAD Color& y, float t)
 {
     return Color(Lerp(x.r, y.r, t), Lerp(x.g, y.g, t),
                  Lerp(x.b, y.b, t), Lerp(x.a, y.a, t));

@@ -26,6 +26,17 @@ required from Phase 4).
 powershell -File scripts/build.ps1 -Config Release
 ```
 
+**macOS** needs only the Xcode command line tools and CMake 3.24+ (`brew install cmake`):
+
+```bash
+scripts/build-mac.sh
+```
+
+It builds a universal arm64 + x86_64 bundle into `build-mac/`, ad-hoc signed, and runs the
+offline checks plus `metaltest`. The GPU path on macOS is **Metal**, not CUDA. Its shader is
+compiled at runtime from source embedded at build time (`cmake/EmbedMetal.cmake`), so full
+Xcode is not needed. The offline `metal` compiler ships only with Xcode.
+
 The OFX SDK is **vendored** in `third_party/openfx`, copied from
 `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\OpenFX` — ProgramData,
 not Program Files.
@@ -52,6 +63,10 @@ Prompts for elevation, since `C:\Program Files\Common Files\OFX\Plugins` needs i
    "the plugin is broken" report, and it is never the plugin.
 
 Requires Resolve **Studio**; the free edition loads no third-party OFX at all.
+
+On **macOS**, `scripts/install-mac.sh` copies the bundle to `/Library/OFX/Plugins` (it asks for
+your password, and refuses while Resolve is running unless given `--force`).
+`scripts/uninstall-mac.sh` removes it.
 
 ---
 
@@ -102,6 +117,26 @@ sub-perceptual error and still fails loudly on anything wider or larger, and pri
 either way so the distinction is visible rather than assumed.
 
 Also registered with CTest, so `ctest --test-dir build -C Release` runs it.
+
+### On macOS: `metaltest`
+
+```bash
+build-mac/metaltest
+```
+
+The Metal counterpart, over the **same cases** (`tools/ParityCases.h`, shared with
+`cudatest`) and the same tolerances. The Metal kernels call the same `ShadePixel`, compiled a
+third time, by the Metal compiler. `src/core` is written so that is possible: a handful of
+macros (`BL_THREAD`, `BL_GLOBAL`, `BL_CONSTANT`, `BL_ELEM` in `Common.h`) supply the address
+spaces MSL insists on and expand to nothing for the CPU and nvcc. With fast maths off,
+FMA contraction off on both sides, and the C maths names routed to `metal::precise`, 13 of
+the 15 cases come out bit-identical and the other two differ by one float ulp (1.2e-7).
+
+It also checks what CUDA never has to. Metal images arrive as whole buffers, not pointers to
+a pixel, so the kernel does its own addressing. One case renders an offset window into
+padded, offset image bounds, with a source that covers only part of the window, and compares
+the whole buffer including the padding. It also prints the shader compile time (about
+160 ms, once per GPU per session) and a UHD frame time.
 
 ---
 
@@ -1415,6 +1450,7 @@ dashes, taper and arrowheads.
 | 2 | Core geometry, SDF, tile grid, `linetest` | done |
 | 3 | CPU render path visible in Resolve | written, unverified |
 | 4 | CUDA path + `cudatest` parity | done, 8/8 agree |
+| 4m | macOS: universal bundle, Metal path + `metaltest` parity | done, 15/15 agree |
 | 5 | Overlay: point/tangent editing, keyframe-aware writes | written, **untestable offline** |
 | 6 | Arrowheads, drop shadow, fill for closed paths, gradient rework | done |
 | 7 | Auto in/out with target choice, anchors, easing | done (stagger + wiggle outstanding) |

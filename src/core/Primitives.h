@@ -199,7 +199,7 @@ BL_HD inline float SdTriangle(Vec2 p, Vec2 v0, Vec2 v1, Vec2 v2)
  * gradient wants anyway -- "how far along the line am I", not "where on the
  * silhouette did I land".
  */
-BL_HD inline DistanceHit DistanceToSegment(Vec2 p, const Segment& seg)
+BL_HD inline DistanceHit DistanceToSegment(Vec2 p, const BL_THREAD Segment& seg)
 {
     DistanceHit hit;
 

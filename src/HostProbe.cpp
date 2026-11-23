@@ -144,6 +144,7 @@ void ProbeHostOnce()
       << "  supportsCudaRender ......... " << YesNo(h->supportsCudaRender) << "\n"
       << "  supportsCudaStream ......... " << YesNo(h->supportsCudaStream) << "\n"
       << "  supportsOpenCLRender ....... " << YesNo(h->supportsOpenCLRender) << "\n"
+      << "  supportsMetalRender ........ " << YesNo(h->supportsMetalRender) << "\n"
       << "  -- secondary --\n"
       << "  supportsMultiResolution .... " << YesNo(h->supportsMultiResolution) << "\n"
       << "  supportsTiles .............. " << YesNo(h->supportsTiles) << "\n"

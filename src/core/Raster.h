@@ -15,23 +15,23 @@ namespace bl {
 /** @brief Everything the kernel needs, as plain pointers. Uploadable as-is. */
 struct SceneView
 {
-    const Segment* segs     = nullptr;
+    const BL_GLOBAL Segment* segs     = nullptr;
     int            segCount = 0;
     TileGridView   grid;
 
     /// Closed contours for fill, with their own band-binned index. Separate from
     /// the stroke geometry because fill is answered by a winding number over the
     /// whole scanline, not by proximity.
-    const FillEdge* fill      = nullptr;
+    const BL_GLOBAL FillEdge* fill      = nullptr;
     int             fillCount = 0;
     BandGridView    bands;
 
     /// One style per stroke, indexed by Segment::style / FillEdge::style.
     /// Never empty: index 0 is the effective global style.
-    const Style* styles     = nullptr;
+    const BL_GLOBAL Style* styles     = nullptr;
     int          styleCount = 0;
 
-    BL_HD const Style& StyleAt(int i) const
+    BL_HD const BL_GLOBAL Style& StyleAt(int i) const
     {
         return styles[(i > 0 && i < styleCount) ? i : 0];
     }
@@ -76,7 +76,7 @@ struct Premul
 };
 
 /** @brief Composite @p src over @p dst, both premultiplied. */
-BL_HD inline void Over(const Premul& src, float* dst)
+BL_HD inline void Over(const BL_THREAD Premul& src, BL_THREAD float* dst)
 {
     const float ia = 1.0f - src.a;
     dst[0] = src.r + dst[0] * ia;
@@ -85,7 +85,7 @@ BL_HD inline void Over(const Premul& src, float* dst)
     dst[3] = src.a + dst[3] * ia;
 }
 
-BL_HD inline void AccumulateOver(const Color& c, float cov, Premul& acc)
+BL_HD inline void AccumulateOver(const BL_THREAD Color& c, float cov, BL_THREAD Premul& acc)
 {
     const float a = Saturate(cov) * Saturate(c.a);
     if (a <= 0.0f) return;
@@ -105,7 +105,7 @@ BL_HD inline void AccumulateOver(const Color& c, float cov, Premul& acc)
  *
  * Returns the line layer at that pixel, premultiplied and ready to composite.
  */
-BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
+BL_HD inline Premul ShadePixel(const BL_THREAD SceneView& scene, float px, float py)
 {
     Premul out;
 
@@ -163,7 +163,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
                     const int idx = scene.bands.items[j];
                     if (idx < 0 || idx >= scene.fillCount) continue;
 
-                    const FillEdge& e = scene.fill[idx];
+                    BL_ELEM(FillEdge) e = scene.fill[idx];
                     if (e.style != groupStyle) break;
 
                     wn += WindingContribution(p, e.a, e.b);
@@ -219,7 +219,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
                         {
                             const int idx = scene.bands.items[k];
                             if (idx < 0 || idx >= scene.fillCount) continue;
-                            const FillEdge& e = scene.fill[idx];
+                            BL_ELEM(FillEdge) e = scene.fill[idx];
                             w2 += WindingContribution(q, e.a, e.b);
                         }
                         if (w2 != 0) ++hits;
@@ -230,7 +230,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         }
     }
 
-    const Style& fillStyle = scene.StyleAt(fillStyleIdx);
+    BL_ELEM(Style) fillStyle = scene.StyleAt(fillStyleIdx);
 
     const int tile = scene.grid.TileOf(static_cast<int>(::floorf(px)),
                                        static_cast<int>(::floorf(py)));
@@ -288,7 +288,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         const int idx = scene.grid.items[i];
         if (idx < 0 || idx >= scene.segCount) continue;
 
-        const Segment& seg = scene.segs[idx];
+        BL_ELEM(Segment) seg = scene.segs[idx];
 
         const DistanceHit hit = DistanceToSegment(p, seg);
         if (hit.d < d) d = hit.d;                 // the union is always the min
@@ -306,7 +306,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
             attrD = hit.d; s = hit.s; u = hit.u; styleIdx = seg.style;
         }
 
-        const Style& segSt = scene.StyleAt(seg.style);
+        BL_ELEM(Style) segSt = scene.StyleAt(seg.style);
         if (segSt.shadow)
         {
             const Vec2  ps(px - segSt.shadowDx, py - segSt.shadowDy);
@@ -315,7 +315,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         }
     }
 
-    const Style& st = scene.StyleAt(styleIdx);
+    BL_ELEM(Style) st = scene.StyleAt(styleIdx);
     const float  hf = st.feather * 0.5f;
     if (d > 1e29f && ds > 1e29f)
     {
@@ -331,7 +331,7 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
         // Shaded with the style of whichever stroke actually cast it, not of the
         // stroke nearest the pixel -- a shadow reaching out from under a
         // neighbour still belongs to the thing that threw it.
-        const Style& ss = scene.StyleAt(shadowStyleIdx);
+        BL_ELEM(Style) ss = scene.StyleAt(shadowStyleIdx);
 
         // The profile of a BLURRED edge, centred on the silhouette -- not a ramp
         // hung outside it.
@@ -399,6 +399,8 @@ BL_HD inline Premul ShadePixel(const SceneView& scene, float px, float py)
     return out;
 }
 
+#if !defined(__METAL_VERSION__)   // host-side only: std::vector, CPU loops
+
 /** @brief Shade a rectangle of pixels and composite over an existing buffer.
  *
  * @param dst        float RGBA, premultiplied
@@ -424,5 +426,7 @@ inline void ShadeRect(const SceneView& scene, float* dst, int rowStride,
         }
     }
 }
+
+#endif // !__METAL_VERSION__
 
 } // namespace bl

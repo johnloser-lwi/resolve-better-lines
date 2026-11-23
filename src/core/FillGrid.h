@@ -17,7 +17,9 @@
 #include "Common.h"
 #include "Primitives.h"
 
+#if !defined(__METAL_VERSION__)
 #include <vector>
+#endif
 
 namespace bl {
 
@@ -36,8 +38,8 @@ struct BandGridView
     int rows       = 0;
     int originY    = 0;
 
-    const int* start = nullptr;   ///< rows + 1 offsets into items (CSR)
-    const int* items = nullptr;
+    const BL_GLOBAL int* start = nullptr;   ///< rows + 1 offsets into items (CSR)
+    const BL_GLOBAL int* items = nullptr;
 
     BL_HD int BandOf(int py) const
     {
@@ -45,6 +47,8 @@ struct BandGridView
         return (r < 0 || r >= rows) ? -1 : r;
     }
 };
+
+#if !defined(__METAL_VERSION__)   // host-side only: std::vector, CPU loops
 
 /** @brief Owning band grid. Built per frame on the CPU, uploaded as-is. */
 struct BandGrid
@@ -139,5 +143,7 @@ inline void AppendFillContour(const std::vector<Vec2>& pts, int style,
     if (Dot2(pts.back() - pts.front()) > 1e-12f)
         out.push_back({pts.back(), pts.front(), style});
 }
+
+#endif // !__METAL_VERSION__
 
 } // namespace bl

@@ -53,6 +53,16 @@ else()
     set(OFX_ARCH_DIR "MacOS")
 endif()
 
+# No FMA contraction. Clang on arm64 fuses a*b+c into a single fused
+# multiply-add by default; MSVC (and x86_64 without -mfma) does not. The fused
+# form rounds once instead of twice, so the same source gives slightly different
+# floats on Apple Silicon than on Windows -- enough to push the xform inverse
+# round-trip check over its limit, and to make renders differ from the Windows
+# build. Off, every slice computes what the Windows build computes.
+if(APPLE)
+    add_compile_options(-ffp-contract=off)
+endif()
+
 # Static CRT. An OFX bundle is loaded by a host that will not have our
 # redistributables installed, and a missing VCRUNTIME dll fails as a *silent
 # no-load*: Resolve simply never lists the plugin, with no error anywhere.
@@ -63,9 +73,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # plus virtual PTX so architectures newer than this toolkit still run.
 # CUDA 13 dropped everything below Turing, so there is no point listing 60/70.
 # No CUDA on Apple, at any version -- the toolkit was dropped after macOS 10.13
-# and Apple Silicon never had it. macOS therefore runs the CPU path: the plugin
-# declares no GPU support there, so Resolve hands it CPU buffers. A Metal path
-# is the macOS counterpart and is NOT written yet (see README).
+# and Apple Silicon never had it. macOS renders through Metal instead (see the
+# Metal section below), and falls back to the CPU path where Metal is absent.
 if(APPLE)
     set(BETTERLINE_CUDA OFF CACHE BOOL "Build the CUDA render path" FORCE)
 endif()
@@ -138,6 +147,51 @@ if(BETTERLINE_HAVE_CUDA)
     # failing for a reason that has nothing to do with the code.
 endif()
 
+# --- Metal render path -------------------------------------------------------
+# The macOS counterpart of the CUDA library above, and built the same way: its
+# own library so the plugin and the parity test link the identical code.
+#
+# The shader is compiled at RUNTIME from source, so the build needs no Metal
+# compiler -- the offline one ships only with full Xcode. What the build does
+# instead is embed the source: cmake/EmbedMetal.cmake concatenates the prelude,
+# src/core and the kernels into one string. The kernels call the same
+# ShadePixel the CPU runs, compiled a third time, by the Metal compiler.
+set(BETTERLINE_HAVE_METAL OFF)
+if(APPLE)
+    option(BETTERLINE_METAL "Build the Metal render path" ON)
+    if(BETTERLINE_METAL)
+        set(METAL_GEN_DIR "${CMAKE_BINARY_DIR}/generated")
+        set(METAL_INC     "${METAL_GEN_DIR}/MetalSource.inc")
+        set(METAL_SOURCES
+            src/render/MetalPrelude.metal
+            src/core/Common.h
+            src/core/Primitives.h
+            src/core/Style.h
+            src/core/TileGrid.h
+            src/core/FillGrid.h
+            src/core/Raster.h
+            src/render/MetalShared.h
+            src/render/MetalKernels.metal
+        )
+        add_custom_command(
+            OUTPUT  "${METAL_INC}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${METAL_GEN_DIR}"
+            COMMAND ${CMAKE_COMMAND} -DOUT=${METAL_INC} -DSRC_ROOT=${CMAKE_SOURCE_DIR}/src
+                    -P "${CMAKE_SOURCE_DIR}/cmake/EmbedMetal.cmake"
+            DEPENDS ${METAL_SOURCES} cmake/EmbedMetal.cmake
+            COMMENT "Embedding the Metal shader source"
+        )
+
+        add_library(blmetal STATIC src/render/MetalRender.mm "${METAL_INC}")
+        target_include_directories(blmetal PUBLIC src PRIVATE "${METAL_GEN_DIR}")
+        target_compile_options(blmetal PRIVATE -fobjc-arc)
+        set_target_properties(blmetal PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_link_libraries(blmetal PUBLIC "-framework Metal" "-framework Foundation")
+        set(BETTERLINE_HAVE_METAL ON)
+        message(STATUS "Metal render path enabled")
+    endif()
+endif()
+
 # --- The plugin --------------------------------------------------------------
 # src/core is header-only and includes no OFX header, so the offline harness
 # links the identical code Resolve runs.
@@ -167,6 +221,11 @@ endif()
 if(BETTERLINE_HAVE_CUDA)
     target_link_libraries(BetterLine PRIVATE blcuda)
     target_compile_definitions(BetterLine PRIVATE BETTERLINE_HAVE_CUDA)
+endif()
+
+if(BETTERLINE_HAVE_METAL)
+    target_link_libraries(BetterLine PRIVATE blmetal)
+    target_compile_definitions(BetterLine PRIVATE BETTERLINE_HAVE_METAL)
 endif()
 
 # OFX plugins are DLLs with a .ofx extension and a single exported entry point.
@@ -200,6 +259,15 @@ if(BETTERLINE_HAVE_CUDA)
     target_include_directories(cudatest PRIVATE src)
     target_link_libraries(cudatest PRIVATE blcuda)
     add_test(NAME cuda_parity COMMAND cudatest)
+endif()
+
+# The same guarantee for Metal, over the same cases (tools/ParityCases.h).
+if(BETTERLINE_HAVE_METAL)
+    add_executable(metaltest tools/metaltest.mm)
+    target_include_directories(metaltest PRIVATE src)
+    target_compile_options(metaltest PRIVATE -fobjc-arc)
+    target_link_libraries(metaltest PRIVATE blmetal)
+    add_test(NAME metal_parity COMMAND metaltest)
 endif()
 
 # --- Assemble the .ofx.bundle ------------------------------------------------

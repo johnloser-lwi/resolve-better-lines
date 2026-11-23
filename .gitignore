@@ -31,3 +31,6 @@ CMakeFiles/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# macOS build tree (scripts/build-mac.sh)
+build-mac/

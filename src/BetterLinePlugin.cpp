@@ -28,6 +28,15 @@
 #ifdef BETTERLINE_HAVE_CUDA
 #include "render/CudaRender.h"
 #endif
+#ifdef BETTERLINE_HAVE_METAL
+#include "render/MetalRender.h"
+#endif
+
+// Either GPU path needs the scene described for upload; only the API differs.
+#if defined(BETTERLINE_HAVE_CUDA) || defined(BETTERLINE_HAVE_METAL)
+#define BL_HAVE_GPU 1
+#include "render/GpuScene.h"
+#endif
 
 #include <cmath>
 #include <cstring>
@@ -100,9 +109,12 @@ public:
     /// which stays byte-for-byte what it was before motion blur existed.
     void setBlurScenes(const std::vector<SceneView>* p_Scenes) { _blur = p_Scenes; }
 
+#ifdef BL_HAVE_GPU
+    void setUpload(const GpuSceneDesc& p_Desc) { _upload = p_Desc; }
+    void setBlurUploads(const std::vector<GpuSceneDesc>* p) { _blurUploads = p; }
+#endif
+
 #ifdef BETTERLINE_HAVE_CUDA
-    void setUpload(const CudaSceneDesc& p_Desc) { _upload = p_Desc; }
-    void setBlurUploads(const std::vector<CudaSceneDesc>* p) { _blurUploads = p; }
 
     /** @brief GPU path.
      *
@@ -139,6 +151,49 @@ public:
         if (!dst || !ok)
         {
             bl::ProbeOnce("cudafail", "CUDA render failed; frames will be wrong");
+            OFX::throwSuiteStatusException(kOfxStatFailed);
+        }
+    }
+#endif
+
+#ifdef BETTERLINE_HAVE_METAL
+    /** @brief GPU path on macOS.
+     *
+     * The images are whole id<MTLBuffer>s, not pointers to a pixel, so
+     * getPixelAddress -- which offsets a CPU pointer -- must not be used here at
+     * all; it would produce an address inside nothing. The buffers go across as
+     * handles, with their bounds and stride, and the kernel does the addressing.
+     * As with CUDA there is no falling back to the CPU loop from in here: the
+     * pixels are GPU memory.
+     */
+    void processImagesMetal() override
+    {
+        const OfxRectI& w = _renderWindow;
+
+        auto describe = [](OFX::Image* im) {
+            MetalImage m;
+            const OfxRectI b = im->getBounds();
+            m.buffer   = im->getPixelData();
+            m.x1 = b.x1; m.y1 = b.y1; m.x2 = b.x2; m.y2 = b.y2;
+            m.rowBytes = im->getRowBytes();
+            return m;
+        };
+
+        const MetalImage dst = describe(_dstImg);
+        MetalImage src;
+        if (_srcImg) src = describe(_srcImg);
+
+        const bool blur = _blurUploads && _blurUploads->size() > 1;
+        std::string err;
+        const bool ok = MetalRenderLine(_pMetalCmdQ,
+                                        _srcImg ? &src : nullptr, dst,
+                                        w.x1, w.y1, w.x2, w.y2,
+                                        blur ? _blurUploads->data() : &_upload,
+                                        blur ? static_cast<int>(_blurUploads->size()) : 1,
+                                        &err);
+        if (!ok)
+        {
+            bl::ProbeOnce("metalfail", "Metal render failed; frames will be wrong: " + err);
             OFX::throwSuiteStatusException(kOfxStatFailed);
         }
     }
@@ -234,9 +289,9 @@ private:
     OFX::Image* _srcImg = nullptr;
     SceneView   _scene;
     const std::vector<SceneView>* _blur = nullptr;
-#ifdef BETTERLINE_HAVE_CUDA
-    CudaSceneDesc _upload;
-    const std::vector<CudaSceneDesc>* _blurUploads = nullptr;
+#ifdef BL_HAVE_GPU
+    GpuSceneDesc _upload;
+    const std::vector<GpuSceneDesc>* _blurUploads = nullptr;
 #endif
 };
 
@@ -1894,8 +1949,9 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
             bl::ProbeOnce("dispatch",
                           std::string("render dispatch: cuda=") +
                           (p_Args.isEnabledCudaRender ? "yes" : "no") +
+                          " metal=" + (p_Args.isEnabledMetalRender ? "yes" : "no") +
                           " opencl=" + (p_Args.isEnabledOpenCLRender ? "yes" : "no") +
-                          "   <- if cuda=no, every frame is running on the CPU and that "
+                          "   <- if cuda=no and metal=no, every frame is running on the CPU and that "
                           "dwarfs every other performance consideration");
         }
     }
@@ -1964,8 +2020,8 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
     std::vector<TileGrid>  blurGrids;
     std::vector<BandGrid>  blurBands;
     std::vector<SceneView> blurScenes;
-#ifdef BETTERLINE_HAVE_CUDA
-    std::vector<CudaSceneDesc> blurUploads;
+#ifdef BL_HAVE_GPU
+    std::vector<GpuSceneDesc> blurUploads;
 #endif
 
     if (nSamples > 1)
@@ -2016,8 +2072,8 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
     processor.setScene(scene);
     processor.setBlurScenes(blurScenes.empty() ? nullptr : &blurScenes);
 
-#ifdef BETTERLINE_HAVE_CUDA
-    CudaSceneDesc upload;
+#ifdef BL_HAVE_GPU
+    GpuSceneDesc upload;
     upload.segs           = scene.segs;
     upload.segCount       = scene.segCount;
     upload.tileStart      = grid.start.empty() ? nullptr : grid.start.data();
@@ -2041,7 +2097,7 @@ void BetterLinePlugin::render(const OFX::RenderArguments& p_Args)
         blurUploads.resize(nSamples);
         for (int k = 0; k < nSamples; ++k)
         {
-            CudaSceneDesc u;
+            GpuSceneDesc u;
             u.segs           = blurScenes[k].segs;
             u.segCount       = blurScenes[k].segCount;
             u.tileStart      = blurGrids[k].start.empty() ? nullptr : blurGrids[k].start.data();
@@ -2155,6 +2211,12 @@ void DescribeShared(OFX::ImageEffectDescriptor& p_Desc, bool p_Generator)
         p_Desc.setSupportsCudaRender(true);
         p_Desc.setSupportsCudaStream(true);
     }
+#endif
+
+#ifdef BETTERLINE_HAVE_METAL
+    // Same rule as CUDA: declared only when a device exists, because once
+    // declared Resolve hands us Metal buffers the CPU loop cannot read.
+    if (bl::MetalAvailable()) p_Desc.setSupportsMetalRender(true);
 #endif
 }
 

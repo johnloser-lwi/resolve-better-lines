@@ -35,8 +35,8 @@ fi
 cmake -S "$REPO" -B "$BUILD" -DCMAKE_BUILD_TYPE="$CONFIG"
 cmake --build "$BUILD" --config "$CONFIG" -j "$(sysctl -n hw.ncpu)"
 
-# The offline checks: stagger ordering, preset round-trip, SVG parsing, shape
-# generators. There is no GPU parity test on macOS -- there is no GPU path.
+# The offline checks -- stagger ordering, preset round-trip, SVG parsing, shape
+# generators -- and metaltest, the CPU/Metal parity suite.
 (cd "$BUILD" && ctest -C "$CONFIG" --output-on-failure)
 
 BUNDLE="$BUILD/$CONFIG/BetterLine.ofx.bundle"

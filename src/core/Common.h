@@ -6,7 +6,9 @@
 // lets tools/linetest and tools/cudatest link the *identical* code Resolve runs,
 // rather than a second implementation that can quietly drift from it.
 
+#if !defined(__METAL_VERSION__)
 #include <cmath>
+#endif
 
 // __host__ __device__ under nvcc, nothing otherwise. The same trick as
 // resolve-multi-transform's MTX_HD: one body of maths, two compilers, no way for
@@ -15,6 +17,33 @@
   #define BL_HD __host__ __device__
 #else
   #define BL_HD
+#endif
+
+// The third compiler: the Metal Shading Language, which the macOS GPU path
+// compiles these same headers with at runtime (src/render/MetalRender.mm).
+//
+// MSL insists that every pointer and reference name its address space, and
+// that program-scope constants live in `constant`. These expand to exactly that
+// under Metal and to NOTHING anywhere else, so the CPU and CUDA builds see the
+// source they always did.
+//
+//   BL_THREAD    a local or a parameter        (thread)
+//   BL_GLOBAL    the scene arrays the GPU reads (device)
+//   BL_CONSTANT  program-scope constants        (constant)
+//   BL_ELEM(T)   one element read out of a scene array. A reference on the
+//                host; a COPY under Metal, because a device reference cannot
+//                bind to the thread-space parameters the rest of the maths
+//                takes. The copy is into registers and changes no arithmetic.
+#if defined(__METAL_VERSION__)
+  #define BL_THREAD   thread
+  #define BL_GLOBAL   device
+  #define BL_CONSTANT constant
+  #define BL_ELEM(T)  const T
+#else
+  #define BL_THREAD
+  #define BL_GLOBAL
+  #define BL_CONSTANT
+  #define BL_ELEM(T)  const T&
 #endif
 
 namespace bl {
@@ -83,7 +112,7 @@ BL_HD inline float BlurredEdge(float d, float sigma)
 /// number or the shadow steps at a tile boundary. 3.5 sigma leaves 0.0026
 /// coverage on the table, under a single 8-bit code value even at full opacity,
 /// which is what makes the cut invisible rather than merely small.
-constexpr float kBlurCutoffSigmas = 3.5f;
+constexpr BL_CONSTANT float kBlurCutoffSigmas = 3.5f;
 
 struct Vec2
 {
@@ -133,7 +162,7 @@ struct Bounds
     }
     BL_HD void Expand(float r) { x0 -= r; y0 -= r; x1 += r; y1 += r; }
     BL_HD bool Empty() const   { return x1 < x0 || y1 < y0; }
-    BL_HD bool Overlaps(const Bounds& o) const
+    BL_HD bool Overlaps(const BL_THREAD Bounds& o) const
     {
         return !(o.x0 > x1 || o.x1 < x0 || o.y0 > y1 || o.y1 < y0);
     }

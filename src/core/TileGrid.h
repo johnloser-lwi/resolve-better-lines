@@ -10,7 +10,9 @@
 #include "Common.h"
 #include "Primitives.h"
 
+#if !defined(__METAL_VERSION__)
 #include <vector>
+#endif
 
 namespace bl {
 
@@ -23,8 +25,8 @@ struct TileGridView
     int originX  = 0;   ///< pixel x of tile column 0
     int originY  = 0;
 
-    const int* start = nullptr;   ///< cols*rows + 1 offsets into items (CSR)
-    const int* items = nullptr;   ///< primitive indices
+    const BL_GLOBAL int* start = nullptr;   ///< cols*rows + 1 offsets into items (CSR)
+    const BL_GLOBAL int* items = nullptr;   ///< primitive indices
 
     BL_HD int TileOf(int px, int py) const
     {
@@ -34,6 +36,8 @@ struct TileGridView
         return cy * cols + cx;
     }
 };
+
+#if !defined(__METAL_VERSION__)   // host-side only: std::vector, CPU loops
 
 /** @brief Owning grid. Built once per frame on the CPU, then uploaded as-is. */
 struct TileGrid
@@ -121,5 +125,7 @@ inline void BuildTileGrid(const std::vector<Segment>& segs, float reach,
                 out.items[cursor[static_cast<size_t>(cy) * out.cols + cx]++] = static_cast<int>(i);
     }
 }
+
+#endif // !__METAL_VERSION__
 
 } // namespace bl
